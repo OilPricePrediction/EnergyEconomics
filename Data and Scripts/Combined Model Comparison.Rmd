@@ -1,0 +1,2914 @@
+---
+title: "OilPricePrediction"
+author: "Constantin Budin, Dr. Christian Haas"
+date: "6/2/2023"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Overview
+
+This is a collection that combines the various models for Oil Price Sentiment predictions.
+
+## Reading in Data and creating training test sets
+
+```{r dataLoad}
+library(tidyverse)
+library(ggplot2)
+library(vars)
+
+# set your working directory to the current file directory 
+tryCatch({
+  setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+  }, error=function(cond){message(paste("cannot change working directory"))
+})
+
+formatted_training_data <- read.csv('Data/formatted_training_data.csv')
+formatted_training_data = formatted_training_data[order(formatted_training_data$Date),]
+
+formatted_training_data$Date <- as.Date(formatted_training_data$Date, origin = "1970-01-01")
+
+# add one-step ahead WTI
+formatted_training_data$WTIplus3 <- lead(formatted_training_data$WTI, n=2)
+formatted_training_data$WTIplus5 <- lead(formatted_training_data$WTI, n=4)
+
+
+training_perc = 0.8
+split = floor(nrow(formatted_training_data) * training_perc)
+num_test = nrow(formatted_training_data) - split
+num_training = nrow(formatted_training_data)-num_test
+
+training_data = formatted_training_data[1:split,]
+test_data = formatted_training_data[(split+1): nrow(formatted_training_data),]  
+
+first_test_day <- formatted_training_data[(split+1),]$Date
+```
+
+## Setting up true test values
+
+For different forecast periods, we can get the various 'true' values of the time series.
+
+```{r}
+
+# y_true_1 <- as.numeric(test_data$WTIplus1 %>% na.omit())
+# 
+# y_true_3 <- as.numeric(test_data$WTIplus3 %>% na.omit())
+# 
+# # y_true_5 <- tail(test_data$WTI, num_test - 4)
+# y_true_5 <- as.numeric(test_data$WTIplus5 %>% na.omit())
+
+y_true_1 <- as.numeric(test_data$WTI)
+y_true_3 <- as.numeric(lead(test_data$WTI,2) %>% na.omit())
+y_true_5 <- as.numeric(lead(test_data$WTI,4) %>% na.omit())
+
+num_test_3 <- length(y_true_3)
+num_test_5 <- length(y_true_5)
+
+
+```
+
+
+## No-Change Forecast
+
+The no-change forecast will be the baseline against which all other models will be compared with.
+
+```{r nochange}
+
+# #looking ahead 1 step
+# y_hat_nochange_all = lag(formatted_training_data$WTI, n=1)[(split+1):nrow(formatted_training_data)]
+# 
+# # looking ahead 3 steps
+# y_hat_nochange_all_3 = lag(formatted_training_data$WTI, n=3)[(split+3):nrow(formatted_training_data)]
+# 
+# # looking ahead 5 steps
+# y_hat_nochange_all_5 = lag(formatted_training_data$WTI, n=5)[(split+5):nrow(formatted_training_data)]
+
+#looking ahead 1 step
+y_hat_nochange_all = formatted_training_data$WTI[(split):(nrow(formatted_training_data)-1)]
+
+# looking ahead 3 steps
+y_hat_nochange_all_3 = formatted_training_data$WTI[(split):(nrow(formatted_training_data)-3)]
+
+# looking ahead 5 steps
+y_hat_nochange_all_5 = formatted_training_data$WTI[(split):(nrow(formatted_training_data)-5)]
+
+
+```
+
+## VAR forecast
+
+This is the set of VAR forecasts
+
+```{r var}
+
+## new: restrict the lag.max a bit to avoid overfitting despite using the AIC criterion
+lagMax = 5
+type ='none'
+p = 3
+
+### first, combination of sentiment
+
+library(tsDyn)
+
+get_VAR_predictions_recursive <- function(training_data, p, lagMax, type, test_data, formatted_training_data, num_test_local, othercolumns = NULL, wticolumn="WTIplus1", steps_ahead=1) {
+  
+  columns = c(othercolumns, wticolumn)
+    
+  var_training_data_all <- training_data[columns]
+  
+  var_test_data_all <- test_data[columns]
+  
+  # rename WTI column to be consistent
+  
+  var_training_data_all <- var_training_data_all %>% 
+    rename(WTI=wticolumn)
+  
+  var_test_data_all <- var_test_data_all %>% 
+    rename(WTI=wticolumn)
+  
+  # var <- VAR(var_training_data_all, p = p, lag.max=lagMax, type=type, ic = "AIC")
+  var <- lineVar(data = var_training_data_all, lag = p, include = "const",
+        model = "VAR", I = "level")
+  
+  data_full = formatted_training_data[columns]
+  data_full <- data_full[complete.cases(data_full),]
+  data_full <- data_full %>% 
+    rename(WTI=wticolumn)
+  # data_full <- VAR(data_full, lag.max=(lagMax+1), type=type, ic = "AIC")$datamat
+  
+  data_test <- data_full[(nrow(data_full) - (num_test_local + p -1 )):nrow(data_full),]
+  # data_test <- data_full[(nrow(data_full) - num_test + 1 ):nrow(data_full),]
+  
+  pred_var <- c()
+  
+  for (i in 1:(nrow(data_test)-p-steps_ahead+1)){
+    pred_var <- c(pred_var, predict(var, newdata = data_test[i:(i+p-1),], n.ahead=steps_ahead)[steps_ahead, ncol(data_test)]) #last column is WTI prediction
+  }
+  # note: need to use head() here to correctly get the forecast for the periods
+  # pred_var <- head(predict(var$varresult$WTI, newdata = data_test, n.ahead=steps_ahead), num_test)
+  # pred_var <- head(pred_var, num_test_local)
+  pred_var
+}
+
+# get prediction for 1 step ahead
+wticolumn = "WTI"
+#wticolumn = "WTIplus1"
+
+steps_ahead = 1
+
+othercolumns = c("watson","vader","vader_average","Loughran.McDonald","henry")
+pred_var_1_all <- get_VAR_predictions_recursive(training_data, p=p, lagMax = lagMax, type=type, formatted_training_data = formatted_training_data, num_test = num_test, test_data = test_data, othercolumns = othercolumns, wticolumn = wticolumn, steps_ahead = steps_ahead)
+
+othercolumns = c("vader","vader_average")
+pred_var_1_vader <- get_VAR_predictions_recursive(training_data, p=p, lagMax = lagMax, type=type, formatted_training_data = formatted_training_data, num_test = num_test, test_data = test_data, othercolumns = othercolumns, wticolumn = wticolumn, steps_ahead = steps_ahead)
+
+othercolumns = c("watson")
+pred_var_1_watson <- get_VAR_predictions_recursive(training_data, p=p, lagMax = lagMax, type=type, formatted_training_data = formatted_training_data, num_test = num_test, test_data = test_data, othercolumns = othercolumns, wticolumn = wticolumn, steps_ahead = steps_ahead)
+
+othercolumns = c("Loughran.McDonald","henry")
+pred_var_1_dict <- get_VAR_predictions_recursive(training_data, p=p, lagMax = lagMax, type=type, formatted_training_data = formatted_training_data, num_test = num_test, test_data = test_data, othercolumns = othercolumns, wticolumn = wticolumn, steps_ahead = steps_ahead)
+
+
+
+# repeat for 3 observations
+wticolumn = "WTI"
+# wticolumn = "WTIplus3"
+
+steps_ahead = 3
+
+othercolumns = c("watson","vader","vader_average","Loughran.McDonald","henry")
+pred_var_3_all <- get_VAR_predictions_recursive(training_data, 
+                                      p=p, lagMax = lagMax, type=type, formatted_training_data = formatted_training_data, num_test = num_test, test_data = test_data, othercolumns = othercolumns, wticolumn = wticolumn, steps_ahead = steps_ahead)
+
+othercolumns = c("vader","vader_average")
+pred_var_3_vader <- get_VAR_predictions_recursive(training_data, p=p, lagMax = lagMax, type=type, formatted_training_data = formatted_training_data, num_test = num_test, test_data = test_data, othercolumns = othercolumns, wticolumn = wticolumn, steps_ahead = steps_ahead)
+
+othercolumns = c("watson")
+pred_var_3_watson <- get_VAR_predictions_recursive(training_data, p=p, lagMax = lagMax, type=type, formatted_training_data = formatted_training_data, num_test = num_test, test_data = test_data, othercolumns = othercolumns, wticolumn = wticolumn, steps_ahead = steps_ahead)
+
+othercolumns = c("Loughran.McDonald","henry")
+pred_var_3_dict <- get_VAR_predictions_recursive(training_data, p=p, lagMax = lagMax, type=type, formatted_training_data = formatted_training_data, num_test = num_test, test_data = test_data, othercolumns = othercolumns, wticolumn = wticolumn, steps_ahead = steps_ahead)
+
+
+# and for 5 observations
+
+wticolumn = "WTI"
+# wticolumn = "WTIplus5"
+
+steps_ahead = 5
+
+othercolumns = c("watson","vader","vader_average","Loughran.McDonald","henry")
+pred_var_5_all <- get_VAR_predictions_recursive(training_data, 
+                                      p=p, lagMax = lagMax, type=type, formatted_training_data = formatted_training_data, num_test = num_test, test_data = test_data, othercolumns = othercolumns, wticolumn = wticolumn, steps_ahead = steps_ahead)
+
+othercolumns = c("vader","vader_average")
+pred_var_5_vader <- get_VAR_predictions_recursive(training_data, p=p, lagMax = lagMax, type=type, formatted_training_data = formatted_training_data, num_test = num_test, test_data = test_data, othercolumns = othercolumns, wticolumn = wticolumn, steps_ahead = steps_ahead)
+
+othercolumns = c("watson")
+pred_var_5_watson <- get_VAR_predictions_recursive(training_data, p=p, lagMax = lagMax, type=type, formatted_training_data = formatted_training_data, num_test = num_test, test_data = test_data, othercolumns = othercolumns, wticolumn = wticolumn, steps_ahead = steps_ahead)
+
+othercolumns = c("Loughran.McDonald","henry")
+pred_var_5_dict <- get_VAR_predictions_recursive(training_data, p=p, lagMax = lagMax, type=type, formatted_training_data = formatted_training_data, num_test = num_test, test_data = test_data, othercolumns = othercolumns, wticolumn = wticolumn, steps_ahead = steps_ahead)
+
+
+### lastly, no sentiment
+# here, let's use a standard ar() model
+
+library(forecast)
+
+var_training_data_no <- training_data$WTI
+var_test_data_no <- test_data$WTI
+
+var_arima <- auto.arima(var_training_data_no, ic='aic')
+pred_var_no <- Arima(var_test_data_no, model = var_arima)$fitted
+(pred_var_no <- as.numeric(pred_var_no))
+
+# based on original file
+# test_data_ar <- rbind(training_data[(nrow(training_data)-2):nrow(training_data),],
+#                       test_data)
+# ar <- arima(training_data$WTI, order=c(3, 0, 0))
+# 
+# pred_var_no_1 <- c()
+# for (i in 1:(nrow(test_data_ar)-3)){
+#   pred_var_no_1 <- c(pred_var_no_1, predict(ar, newdata=test_data_ar[i:(i+3),]$WTI, n.ahead = 1, se.fit=F))
+# }
+# 
+# (pred_var_no_1_new <- predict(ar, newdata=test_data_ar[1:4,], n.ahead = 3, se.fit = F))
+# 
+
+ar <- arima(training_data$WTI, order=c(3, 0, 0))
+pred_var_no_1 <- Arima(test_data$WTI, model=ar, order = c(3,0,0))$fitted
+pred_var_no_1 <- as.numeric(pred_var_no_1 %>% na.omit())
+pred_var_no_1
+
+# ar3 <- arima(training_data$WTIplus3, order=c(3, 0, 0))
+# pred_var_no3 <- Arima(test_data$WTIplus3, model=ar, order = c(3,0,0))$fitted
+# pred_var_no_3 <- as.numeric(pred_var_no3 %>% na.omit())
+# pred_var_no_3
+# 
+# ar5 <- arima(training_data$WTIplus5, order=c(3, 0, 0))
+# pred_var_no5 <- Arima(test_data$WTIplus5, model=ar, order = c(3,0,0))$fitted
+# pred_var_no_5 <- as.numeric(pred_var_no5 %>% na.omit())
+# pred_var_no_5
+
+pred_var_no_3 <- head(as.numeric(forecast(pred_var_no_1, h = 3)$fitted), num_test - 2)
+
+pred_var_no_5 <- head(as.numeric(forecast(pred_var_no_1, h = 5)$fitted), num_test - 4)
+
+# (pred_var_no_test <- predict(ar, newdata=test_data$WTI, n.ahead=num_test, se.fit=F))
+# (pred_var_no_test2 <- forecast(ar, h=3))
+# 
+# 
+# # using the forecast function
+# pred_var_no_1 <- Arima(test_data$WTI, model=ar)
+# pred_var_no_1 <- as.numeric(forecast(pred_var_no_1, h = 1)$fitted)
+# 
+# pred_var_no_3 <- head(as.numeric(forecast(pred_var_no_1, h = 3)$fitted), num_test - 2)
+# 
+# pred_var_no_5 <- head(as.numeric(forecast(pred_var_no_1, h = 5)$fitted), num_test - 4)
+
+```
+
+
+## Theoretical Spread Models
+
+Vector code version for better processing:
+
+```{r spread}
+library('openxlsx')
+library('lubridate')
+data <- read.xlsx('Data/SpreadData.xlsx', sheet = 5)
+
+data$Date = convertToDate(data$Date, origin = "1899-12-30", tz="America/New_York")
+# data$Date = as.Date(data$Date, origin = "1970-01-01")
+
+data= data[order(data$Date),]
+data$DateNum <- as.numeric(data$Date)
+
+inflation <- read.xlsx('Data/DP_LIVE_2021_Update.xlsx')
+inflation$TIME <- as.POSIXct(as.yearmon(inflation$TIME), format = "%YYYY-%m")
+
+inflation = inflation[order(inflation$TIME),]
+inflation$month = month(inflation$TIME)
+inflation$year = year(inflation$TIME)
+inflation$days_in_month = days_in_month(inflation$TIME)
+days_in_month(inflation$TIME[1])
+
+data$inflation_2015 = NA
+data$inflation_rate = NA
+
+date = data$Date
+date_prev = as.Date(date) %m-% months(1)
+inflation$DateNew <- format(as.Date(inflation$TIME,format = "%Y-%m"))
+inflation$DateNew <- format(as.Date(inflation$DateNew), "%Y-%m")
+
+inflation$PrevMonth <- lag(inflation$Value, 1)
+
+data$DateNew <- format(as.Date(data$Date, format = "%Y-%m"))
+data$DateNew <- format(as.Date(data$DateNew), "%Y-%m")
+
+data$DatePrev <- as.Date(data$Date) %m-% months(1)
+data$DatePrev <- format(as.Date(data$DatePrev), "%Y-%m")
+
+data_new <- merge(data,inflation,by.x='DateNew',by.y = 'DateNew', all.x=TRUE)
+
+temp = day(date)/data_new$days_in_month
+
+temp2 = data_new$Value/data_new$PrevMonth
+
+data_new$inflation_2015 = data_new$PrevMonth*((data_new$Value/data_new$PrevMonth)^(day(date)/data_new$days_in_month))
+  
+data_new$inflation_rate = (data_new$Value/data_new$PrevMonth)^(1/data_new$days_in_month)-1
+
+data = data_new[,1:10]
+
+#only till 12 2019 after that no inflation data yet
+data$real_wti = data$`Cushing,.OK.WTI.Spot.Price.FOB.(Dollars.per.Barrel)`/(data$inflation_2015/100)
+
+data$wti_log<-log(data$`Cushing,.OK.WTI.Spot.Price.FOB.(Dollars.per.Barrel)`)
+
+# first, diff for one period
+data$oil_log_diff = NA
+data$oil_log_diff[1:(nrow(data)-1)] = diff(data$wti_log)
+
+# then, diff for three and five periods
+data$oil_log_diff_3 = NA
+data$oil_log_diff_3[1:(nrow(data)-3)] = diff(data$wti_log, lag = 3)
+data$oil_log_diff_5 = NA
+data$oil_log_diff_5[1:(nrow(data)-5)] = diff(data$wti_log, lag = 5)
+
+data$weighted = log(data$`heating.oil.New.York.Harbor.No..2.Heating.Oil.Spot.Price.FOB.(Dollars.per.Gallon`)
+data$diff = data$weighted-data$`Cushing,.OK.WTI.Spot.Price.FOB.(Dollars.per.Barrel)`
+
+data = na.omit(data)
+data$no_change = NA
+data$no_change[2:nrow(data)] = data$real_wti[1:nrow(data)-1]
+
+data = na.omit(data)
+
+# note: adjusted to reflect the same training period
+training_data_spread = data[data$Date < first_test_day,]
+test_data_spread = data[data$Date>= first_test_day & data$Date < "2020-02-08",]  
+
+# this corresponds to equation 7 in the paper, to estimate alpha and beta
+model = lm(oil_log_diff ~ diff, data=training_data_spread)
+summary(model)
+
+# the predicted outcome should then be used to calculate P_t+h
+test_data_spread$predicted = predict(model, test_data_spread)
+
+test_data_spread$p_hat = test_data_spread$real_wti*exp(test_data_spread$predicted-test_data_spread$inflation_rate)
+
+test_data_spread$p_hat_shifted = NA
+test_data_spread$p_hat_shifted[2:nrow(test_data_spread)] = test_data_spread$p_hat[1:(nrow(test_data_spread)-1)]
+
+# update: we can actually use the initial model to predict the first entry of the test set as well
+temp <- training_data_spread$real_wti*exp(model$fitted.values-training_data_spread$inflation_rate)
+test_data_spread$p_hat_shifted[1]<- temp[nrow(training_data_spread)]
+test_data_spread = na.omit(test_data_spread)
+
+pred_spread = sqrt(sum((test_data_spread$real_wti - test_data_spread$p_hat_shifted)^2)/nrow(test_data_spread))
+no_spread = sqrt(sum((test_data_spread$real_wti - test_data_spread$no_change)^2)/nrow(test_data_spread))
+
+pred_spread/no_spread
+
+# now repeating it for h=3 and h=5
+model_3 = lm(oil_log_diff_3 ~ diff, data=training_data_spread)
+summary(model_3)
+
+# the predicted outcome should then be used to calculate P_t+h
+test_data_spread$predicted_3 = predict(model_3, test_data_spread)
+
+test_data_spread$p_hat_3 = test_data_spread$real_wti*exp(test_data_spread$predicted_3-test_data_spread$inflation_rate)
+
+test_data_spread$p_hat_shifted_3 = NA
+test_data_spread$p_hat_shifted_3[4:nrow(test_data_spread)] = test_data_spread$p_hat_3[1:(nrow(test_data_spread)-3)]
+
+# update: we can actually use the initial model to predict the first entry of the test set as well
+temp <- training_data_spread$real_wti*exp(model_3$fitted.values-training_data_spread$inflation_rate)
+test_data_spread$p_hat_shifted_3[1:3]<- temp[(nrow(training_data_spread) - 2): nrow(training_data_spread)]
+test_data_spread = na.omit(test_data_spread)
+
+# h=5
+model_5 = lm(oil_log_diff_5 ~ diff, data=training_data_spread)
+summary(model_5)
+
+# the predicted outcome should then be used to calculate P_t+h
+test_data_spread$predicted_5 = predict(model_5, test_data_spread)
+
+test_data_spread$p_hat_5 = test_data_spread$real_wti*exp(test_data_spread$predicted_5-test_data_spread$inflation_rate)
+
+test_data_spread$p_hat_shifted_5 = NA
+test_data_spread$p_hat_shifted_5[6:nrow(test_data_spread)] = test_data_spread$p_hat_5[1:(nrow(test_data_spread)-5)]
+
+# update: we can actually use the initial model to predict the first entry of the test set as well
+temp <- training_data_spread$real_wti*exp(model_5$fitted.values-training_data_spread$inflation_rate)
+test_data_spread$p_hat_shifted_5[1:5]<- temp[(nrow(training_data_spread) - 4): nrow(training_data_spread)]
+test_data_spread = na.omit(test_data_spread)
+
+
+
+# # now looking at limited test data
+
+limited_test_data <- test_data_spread[test_data_spread$Date >= "2017-11-18 00:00:00" & test_data_spread$Date < "2020-02-08",]
+
+preds_limited_spread <- limited_test_data$p_hat_shifted
+preds_limited_spread_3 <- limited_test_data$p_hat_shifted_3
+preds_limited_spread_5 <- limited_test_data$p_hat_shifted_5
+
+pred_limited = sqrt(sum((limited_test_data$real_wti - limited_test_data$p_hat_shifted)^2)/nrow(limited_test_data))
+no_limited = sqrt(sum((limited_test_data$real_wti - limited_test_data$no_change)^2)/nrow(limited_test_data))
+
+pred_limited/no_limited
+
+# # new: limited training data
+training_data_spread_limited = data[data$Date >= "2017-11-18 00:00:00" & data$Date < first_test_day,]
+test_data_spread_limited = data[data$Date>= first_test_day & data$Date <= "2020-02-08",]  
+
+model_limited = lm(oil_log_diff ~ diff, data=training_data_spread_limited)
+summary(model_limited)
+
+test_data_spread_limited$predicted = predict(model_limited, test_data_spread_limited)
+
+test_data_spread_limited$p_hat = test_data_spread_limited$real_wti*exp(test_data_spread_limited$predicted-test_data_spread_limited$inflation_rate)
+
+test_data_spread_limited$p_hat_shifted = NA
+test_data_spread_limited$p_hat_shifted[2:nrow(test_data_spread_limited)] = test_data_spread_limited$p_hat[1:(nrow(test_data_spread_limited)-1)]
+# update: we can actually use the initial model to predict the first entry of the test set s well
+temp <- training_data_spread_limited$real_wti*exp(model_limited$fitted.values-training_data_spread_limited$inflation_rate)
+test_data_spread_limited$p_hat_shifted[1]<- temp[nrow(training_data_spread_limited)]
+test_data_spread_limited = na.omit(test_data_spread_limited)
+
+pred_spread_limited = sqrt(sum((test_data_spread_limited$real_wti - test_data_spread_limited$p_hat_shifted)^2)/nrow(test_data_spread_limited))
+no_spread_limited = sqrt(sum((test_data_spread_limited$real_wti - test_data_spread_limited$no_change)^2)/nrow(test_data_spread_limited))
+
+pred_spread_limited/no_spread_limited
+
+test_data_spread_limited$preds_limited_spread <- test_data_spread_limited$p_hat_shifted * test_data_spread_limited$inflation_2015/100
+preds_limited_training_spread <- test_data_spread_limited$p_hat_shifted * test_data_spread_limited$inflation_2015/100
+
+preds_limited_spread <- limited_test_data$p_hat_shifted * limited_test_data$inflation_2015/100
+
+plot(test_data_spread$Date, test_data_spread$real_wti, type="l", col="blue")
+lines(test_data_spread$Date, test_data_spread$p_hat_shifted, col="red", type="l")
+
+plot(limited_test_data$Date, limited_test_data$real_wti, type="l", col="blue")
+lines(limited_test_data$Date, limited_test_data$p_hat_shifted, col="red", type="l")
+lines(limited_test_data$Date, limited_test_data$no_change, col="green", type="l")
+
+plot(test_data_spread$Date, test_data_spread$p_hat_shifted - test_data_spread$real_wti, type = "l")
+
+# adding h=3 and h=5 for limited spread
+# first, h=3
+model_limited_3 = lm(oil_log_diff_3 ~ diff, data=training_data_spread_limited)
+summary(model_limited_3)
+
+test_data_spread_limited$predicted_3= predict(model_limited_3, test_data_spread_limited)
+
+test_data_spread_limited$p_hat_3 = test_data_spread_limited$real_wti*exp(test_data_spread_limited$predicted_3-test_data_spread_limited$inflation_rate)
+
+test_data_spread_limited$p_hat_shifted_3 = NA
+test_data_spread_limited$p_hat_shifted_3[4:nrow(test_data_spread_limited)] = test_data_spread_limited$p_hat_3[1:(nrow(test_data_spread_limited)-3)]
+# update: we can actually use the initial model to predict the first entry of the test set s well
+temp <- training_data_spread_limited$real_wti*exp(model_limited_3$fitted.values-training_data_spread_limited$inflation_rate)
+test_data_spread_limited$p_hat_shifted_3[1:3]<- temp[(nrow(training_data_spread_limited)-2):nrow(training_data_spread_limited)]
+test_data_spread_limited = na.omit(test_data_spread_limited)
+
+pred_spread_limited_3 = sqrt(sum((test_data_spread_limited$real_wti - test_data_spread_limited$p_hat_shifted_3)^2)/nrow(test_data_spread_limited))
+no_spread_limited_3 = sqrt(sum((test_data_spread_limited$real_wti - test_data_spread_limited$no_change)^2)/nrow(test_data_spread_limited))
+
+# pred_spread_limited/no_spread_limited
+
+test_data_spread_limited$preds_limited_spread_3 <- test_data_spread_limited$p_hat_shifted_3 * test_data_spread_limited$inflation_2015/100
+preds_limited_training_spread_3 <- test_data_spread_limited$p_hat_shifted_3 * test_data_spread_limited$inflation_2015/100
+
+preds_limited_spread_3 <- limited_test_data$p_hat_shifted_3 * limited_test_data$inflation_2015/100
+
+
+# then, h=5
+model_limited_5 = lm(oil_log_diff_5 ~ diff, data=training_data_spread_limited)
+summary(model_limited_5)
+
+test_data_spread_limited$predicted_5 = predict(model_limited_5, test_data_spread_limited)
+
+test_data_spread_limited$p_hat_5 = test_data_spread_limited$real_wti*exp(test_data_spread_limited$predicted_5-test_data_spread_limited$inflation_rate)
+
+test_data_spread_limited$p_hat_shifted_5 = NA
+test_data_spread_limited$p_hat_shifted_5[6:nrow(test_data_spread_limited)] = test_data_spread_limited$p_hat_5[1:(nrow(test_data_spread_limited)-5)]
+# update: we can actually use the initial model to predict the first entry of the test set s well
+temp <- training_data_spread_limited$real_wti*exp(model_limited_5$fitted.values-training_data_spread_limited$inflation_rate)
+test_data_spread_limited$p_hat_shifted_5[1:5]<- temp[(nrow(training_data_spread_limited)-4):nrow(training_data_spread_limited)]
+test_data_spread_limited = na.omit(test_data_spread_limited)
+
+pred_spread_limited_5 = sqrt(sum((test_data_spread_limited$real_wti - test_data_spread_limited$p_hat_shifted_5)^2)/nrow(test_data_spread_limited))
+no_spread_limited_5 = sqrt(sum((test_data_spread_limited$real_wti - test_data_spread_limited$no_change)^2)/nrow(test_data_spread_limited))
+
+# pred_spread_limited/no_spread_limited
+
+test_data_spread_limited$preds_limited_spread_5 <- test_data_spread_limited$p_hat_shifted_5 * test_data_spread_limited$inflation_2015/100
+preds_limited_training_spread_5 <- test_data_spread_limited$p_hat_shifted_5 * test_data_spread_limited$inflation_2015/100
+
+preds_limited_spread_5 <- limited_test_data$p_hat_shifted_5 * limited_test_data$inflation_2015/100
+
+
+# finally, add the predictions to the respective sets
+
+test_data_spread$y_true_spread <- test_data_spread$real_wti*test_data_spread$inflation_2015/100
+
+test_data_spread$Pred1 <- preds_limited_spread
+test_data_spread$Pred3 <- preds_limited_spread_3
+test_data_spread$Pred5 <- preds_limited_spread_5
+
+test_data_spread$PredLimited1 <- preds_limited_training_spread
+test_data_spread$PredLimited3 <- preds_limited_training_spread_3
+test_data_spread$PredLimited5 <- preds_limited_training_spread_5
+
+
+```
+
+## Neural Network Models
+
+First, for the 1 period forecasts:
+
+```{r nn}
+
+temp = list.files("Data/Run1", pattern="*.csv")
+temp_run2 = list.files("Data/Run2", pattern="*.csv")
+
+dir_name <- "Data/Run with forecasting 1 period/Direct Forecast/"
+temp = list.files(dir_name, pattern="*.csv")
+
+
+nn_comb = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_watson = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_dict = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_vader = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_no = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+
+nn_comb_rel = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_watson_rel = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_dict_rel = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_vader_rel = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_no_rel = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+
+
+for (file in temp){
+  nn_temp = read.csv(paste0(dir_name,file))
+  if(grepl('absolute', file, fixed=TRUE)){
+    if(grepl('combination', file, fixed=TRUE)|grepl('Combination', file, fixed=TRUE)){
+      nn_comb <- rbind(nn_comb, nn_temp)
+    }
+    else if(grepl('henry', file, fixed=TRUE)){
+      nn_dict <- rbind(nn_dict, nn_temp)
+    }
+    else if(grepl('watson', file, fixed=TRUE)){
+      nn_watson <- rbind(nn_watson, nn_temp)
+    }
+    else if(grepl('vader', file, fixed=TRUE)){
+      nn_vader <- rbind(nn_vader, nn_temp)
+    }
+    else if(grepl('NoSentiment', file, fixed=TRUE)){
+      nn_no <- rbind(nn_no, nn_temp)
+    }
+  }
+  else if(grepl('relative', file, fixed=TRUE)){
+    if(grepl('combination', file, fixed=TRUE)|grepl('Combination', file, fixed=TRUE)){
+      nn_comb_rel <- rbind(nn_comb_rel, nn_temp)
+    }
+    else if(grepl('henry', file, fixed=TRUE)){
+      nn_dict_rel <- rbind(nn_dict_rel, nn_temp)
+    }
+    else if(grepl('watson', file, fixed=TRUE)){
+      nn_watson_rel <- rbind(nn_watson_rel, nn_temp)
+    }
+    else if(grepl('vader', file, fixed=TRUE)){
+      nn_vader_rel <- rbind(nn_vader_rel, nn_temp)
+    }
+    else if(grepl('NoSentiment', file, fixed=TRUE)){
+      nn_no_rel <- rbind(nn_no_rel, nn_temp)
+    }
+  }
+}
+for (file in temp_run2){
+  nn_temp = read.csv(paste0('Data/Run2/',file))
+  if(grepl('absolute', file, fixed=TRUE)){
+    if(grepl('combination', file, fixed=TRUE)|grepl('Combination', file, fixed=TRUE)){
+      nn_comb <- rbind(nn_comb, nn_temp)
+    }
+    else if(grepl('henry', file, fixed=TRUE)){
+      nn_dict <- rbind(nn_dict, nn_temp)
+    }
+    else if(grepl('watson', file, fixed=TRUE)){
+      nn_watson <- rbind(nn_watson, nn_temp)
+    }
+    else if(grepl('vader', file, fixed=TRUE)){
+      nn_vader <- rbind(nn_vader, nn_temp)
+    }
+    else if(grepl('NoSentiment', file, fixed=TRUE)){
+      nn_no <- rbind(nn_no, nn_temp)
+    }
+  }
+  else if(grepl('relative', file, fixed=TRUE)){
+    if(grepl('combination', file, fixed=TRUE)|grepl('Combination', file, fixed=TRUE)){
+      nn_comb_rel <- rbind(nn_comb_rel, nn_temp)
+    }
+    else if(grepl('henry', file, fixed=TRUE)){
+      nn_dict_rel <- rbind(nn_dict_rel, nn_temp)
+    }
+    else if(grepl('watson', file, fixed=TRUE)){
+      nn_watson_rel <- rbind(nn_watson_rel, nn_temp)
+    }
+    else if(grepl('vader', file, fixed=TRUE)){
+      nn_vader_rel <- rbind(nn_vader_rel, nn_temp)
+    }
+    else if(grepl('NoSentiment', file, fixed=TRUE)){
+      nn_no_rel <- rbind(nn_no_rel, nn_temp)
+    }
+  }
+}
+
+# get the predictions for the minimum RMSE
+# here, we distinguish between the results for based on the minimum rmse on the training set, using the model returned by the cross-validation function, and separately re-training the model based on the lowest rmse on the training set
+
+
+get_min_RMSE_predictions <- function(predictions,average_preds=FALSE){
+    nn_temp_1 <- predictions[which(predictions$rmse_hypermodel_retrained == min(predictions$rmse_hypermodel_retrained)),]$y_hat_hypermodel_retrained
+  nn_temp_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_temp_1)
+  nn_temp_1 <- gsub('\\\n ',",", nn_temp_1)
+  nn_temp_1 <- strsplit(nn_temp_1, ',')
+  # nn_temp_1 <- as.numeric(nn_temp_1[[1]])
+  # 
+  # nn_temp_2 <- predictions[which(predictions$rmse_train == min(predictions$rmse_train)),]$y_hat
+  # nn_temp_2 <- gsub("\\[|\\]|\\[[|\\]]","",nn_temp_2)
+  # nn_temp_2 <- gsub('\\\n ',",", nn_temp_2)
+  # nn_temp_2 <- strsplit(nn_temp_2, ',')
+  # nn_temp_2 <- as.numeric(nn_temp_2[[1]])
+  # 
+  # nn_temp_train <- predictions[which(predictions$rmse_train == min(predictions$rmse_train)),]$y_hat_train
+  # nn_temp_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_temp_train)
+  # nn_temp_train <- gsub('\\\n ',",", nn_temp_train)
+  # nn_temp_train <- strsplit(nn_temp_train, ',')
+  # nn_temp_train <- as.numeric(nn_temp_train[[1]])
+  nn_temp_1 <- strsplit(nn_temp_1[[1]], ' ')
+  nn_temp_1 <- lapply(nn_temp_1, function(z){ z[!is.na(z) & z != ""]})
+  nn_temp_1 <- rapply(nn_temp_1, function(x) tail(x, 1))
+  nn_temp_1 <- as.numeric(nn_temp_1)
+  
+  nn_temp_2 <- predictions[which(predictions$rmse_train == min(predictions$rmse_train)),]$y_hat
+  nn_temp_2 <- gsub("\\[|\\]|\\[[|\\]]","",nn_temp_2)
+  nn_temp_2 <- gsub('\\\n ',",", nn_temp_2)
+  nn_temp_2 <- strsplit(nn_temp_2, ',')
+  nn_temp_2 <- strsplit(nn_temp_2[[1]], ' ')
+  nn_temp_2 <- lapply(nn_temp_2, function(z){ z[!is.na(z) & z != ""]})
+  nn_temp_2 <- rapply(nn_temp_2, function(x) tail(x, 1))
+  nn_temp_2 <- as.numeric(nn_temp_2)
+  
+  # nn_temp_train <- predictions[which(predictions$rmse_train == min(predictions$rmse_train)),]$y_hat_train
+  # nn_temp_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_temp_train)
+  # nn_temp_train <- gsub('\\\n ',",", nn_temp_train)
+  # nn_temp_train <- strsplit(nn_temp_train, ',')
+  # nn_temp_train <- strsplit(nn_temp_train[[1]], ' ')
+  # nn_temp_train <- lapply(nn_temp_train, function(z){ z[!is.na(z) & z != ""]})
+  # nn_temp_train <- rapply(nn_temp_train, function(x) tail(x, 1))
+  # nn_temp_train <- as.numeric(nn_temp_train)
+
+  if (average_preds==TRUE){
+    nn_temp_pred <- (nn_temp_1 + nn_temp_2)/2
+  } else{
+    nn_temp_pred = nn_temp_1
+  }
+  
+  nn_temp_pred
+}
+
+average_preds = FALSE
+
+nn_pred_comb <- get_min_RMSE_predictions(nn_comb, average_preds)
+
+nn_pred_watson <- get_min_RMSE_predictions(nn_watson, average_preds)
+
+nn_pred_vader <- get_min_RMSE_predictions(nn_vader, average_preds)
+
+nn_pred_dict <- get_min_RMSE_predictions(nn_dict, average_preds)
+
+nn_pred_no <- get_min_RMSE_predictions(nn_no, average_preds)
+
+
+# nn_pred <- nn_comb[which(nn_comb$rmse_train == min(nn_comb$rmse_train)),]$y_hat_hypermodel_retrained
+# 
+# nn_pred <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred)
+# nn_pred <- gsub('\\\n ',",", nn_pred)
+# nn_pred <- strsplit(nn_pred, ',')
+# nn_pred <- as.numeric(nn_pred[[1]])
+# 
+# nn_pred_1 <- nn_comb[which(nn_comb$rmse_train == min(nn_comb$rmse_train)),]$y_hat
+# nn_pred_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_1)
+# nn_pred_1 <- gsub('\\\n ',",", nn_pred_1)
+# nn_pred_1 <- strsplit(nn_pred_1, ',')
+# nn_pred_1 <- as.numeric(nn_pred_1[[1]])
+# 
+# nn_pred_train <- nn_comb[which(nn_comb$rmse_train == min(nn_comb$rmse_train)),]$y_hat_train
+# nn_pred_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_train)
+# nn_pred_train <- gsub('\\\n ',",", nn_pred_train)
+# nn_pred_train <- strsplit(nn_pred_train, ',')
+# nn_pred_train <- as.numeric(nn_pred_train[[1]])
+# nn_pred_comb_train <- nn_pred_train
+# 
+# if (average_preds==TRUE){
+#   nn_pred <- (nn_pred + nn_pred_1)/2
+# } else{
+#   nn_pred = nn_pred_1
+# }
+# 
+# nn_pred_comb <- nn_pred
+# 
+# 
+# nn_pred <- nn_watson[which(nn_watson$rmse_train == min(nn_watson$rmse_train)),]$y_hat_hypermodel_retrained
+# nn_pred <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred)
+# nn_pred <- gsub('\\\n ',",", nn_pred)
+# nn_pred <- strsplit(nn_pred, ',')
+# nn_pred <- as.numeric(nn_pred[[1]])
+# 
+# nn_pred_1 <- nn_watson[which(nn_watson$rmse_train == min(nn_watson$rmse_train)),]$y_hat
+# nn_pred_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_1)
+# nn_pred_1 <- gsub('\\\n ',",", nn_pred_1)
+# nn_pred_1 <- strsplit(nn_pred_1, ',')
+# nn_pred_1 <- as.numeric(nn_pred_1[[1]])
+# 
+# nn_pred_train <- nn_watson[which(nn_watson$rmse_train == min(nn_watson$rmse_train)),]$y_hat_train
+# nn_pred_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_train)
+# nn_pred_train <- gsub('\\\n ',",", nn_pred_train)
+# nn_pred_train <- strsplit(nn_pred_train, ',')
+# nn_pred_train <- as.numeric(nn_pred_train[[1]])
+# nn_pred_watson_train <- nn_pred_train
+# 
+# if (average_preds==TRUE){
+#   nn_pred <- (nn_pred + nn_pred_1)/2
+# } else{
+#   nn_pred = nn_pred_1
+# }
+# 
+# nn_pred_watson <- nn_pred
+# 
+# nn_pred <- nn_vader[which(nn_vader$rmse_train == min(nn_vader$rmse_train)),]$y_hat_hypermodel_retrained
+# 
+# nn_pred <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred)
+# nn_pred <- gsub('\\\n ',",", nn_pred)
+# nn_pred <- strsplit(nn_pred, ',')
+# nn_pred <- as.numeric(nn_pred[[1]])
+# 
+# nn_pred_1 <- nn_vader[which(nn_vader$rmse_train == min(nn_vader$rmse_train)),]$y_hat
+# nn_pred_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_1)
+# nn_pred_1 <- gsub('\\\n ',",", nn_pred_1)
+# nn_pred_1 <- strsplit(nn_pred_1, ',')
+# nn_pred_1 <- as.numeric(nn_pred_1[[1]])
+# 
+# nn_pred_train <- nn_vader[which(nn_vader$rmse_train == min(nn_vader$rmse_train)),]$y_hat_train
+# nn_pred_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_train)
+# nn_pred_train <- gsub('\\\n ',",", nn_pred_train)
+# nn_pred_train <- strsplit(nn_pred_train, ',')
+# nn_pred_train <- as.numeric(nn_pred_train[[1]])
+# nn_pred_vader_train <- nn_pred_train
+# 
+# if (average_preds==TRUE){
+#   nn_pred <- (nn_pred + nn_pred_1)/2
+# } else{
+#   nn_pred = nn_pred_1
+# }
+# 
+# nn_pred_vader <- nn_pred
+# 
+# nn_pred <- nn_dict[which(nn_dict$rmse_train == min(nn_dict$rmse_train)),]$y_hat_hypermodel_retrained
+# nn_pred <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred)
+# nn_pred <- gsub('\\\n ',",", nn_pred)
+# nn_pred <- strsplit(nn_pred, ',')
+# nn_pred <- as.numeric(nn_pred[[1]])
+# 
+# nn_pred_1 <- nn_dict[which(nn_dict$rmse_train == min(nn_dict$rmse_train)),]$y_hat
+# nn_pred_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_1)
+# nn_pred_1 <- gsub('\\\n ',",", nn_pred_1)
+# nn_pred_1 <- strsplit(nn_pred_1, ',')
+# nn_pred_1 <- as.numeric(nn_pred_1[[1]])
+# 
+# nn_pred_train <- nn_dict[which(nn_dict$rmse_train == min(nn_dict$rmse_train)),]$y_hat_train
+# nn_pred_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_train)
+# nn_pred_train <- gsub('\\\n ',",", nn_pred_train)
+# nn_pred_train <- strsplit(nn_pred_train, ',')
+# nn_pred_train <- as.numeric(nn_pred_train[[1]])
+# nn_pred_dict_train <- nn_pred_train
+# 
+# if (average_preds==TRUE){
+#   nn_pred <- (nn_pred + nn_pred_1)/2
+# } else{
+#   nn_pred = nn_pred_1
+# }
+# 
+# nn_pred_dict <- nn_pred
+# 
+# nn_pred <- nn_no[which(nn_no$rmse_train == min(nn_no$rmse_train)),]$y_hat_hypermodel_retrained
+# nn_pred <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred)
+# nn_pred <- gsub('\\\n ',",", nn_pred)
+# nn_pred <- strsplit(nn_pred, ',')
+# nn_pred <- as.numeric(nn_pred[[1]])
+# 
+# nn_pred_1 <- nn_no[which(nn_no$rmse_train == min(nn_no$rmse_train)),]$y_hat
+# nn_pred_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_1)
+# nn_pred_1 <- gsub('\\\n ',",", nn_pred_1)
+# nn_pred_1 <- strsplit(nn_pred_1, ',')
+# nn_pred_1 <- as.numeric(nn_pred_1[[1]])
+# 
+# nn_pred_train <- nn_no[which(nn_no$rmse_train == min(nn_no$rmse_train)),]$y_hat_train
+# nn_pred_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_train)
+# nn_pred_train <- gsub('\\\n ',",", nn_pred_train)
+# nn_pred_train <- strsplit(nn_pred_train, ',')
+# nn_pred_train <- as.numeric(nn_pred_train[[1]])
+# nn_pred_no_train <- nn_pred_train
+# 
+# if (average_preds==TRUE){
+#   nn_pred <- (nn_pred + nn_pred_1)/2
+# } else{
+#   nn_pred = nn_pred_1
+# }
+# 
+# nn_pred_no <- nn_pred
+```
+
+Second, for the 3 period forecasts:
+
+```{r nn}
+
+temp = list.files("Data/Run with forecasting 3 periods", pattern="*.csv")
+
+dir_name <- "Data/Run with forecasting 3 periods/Direct Forecast/"
+temp = list.files(dir_name, pattern="*.csv")
+
+
+nn_comb_3 = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_watson_3 = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_dict_3 = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_vader_3 = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_no_3 = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+
+nn_comb_rel_3 = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_watson_rel_3 = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_dict_rel_3 = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_vader_rel_3 = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_no_rel_3 = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+
+
+for (file in temp){
+  nn_temp_3 = read.csv(paste0(dir_name,file))
+  if(grepl('absolute', file, fixed=TRUE)){
+    if(grepl('combination', file, fixed=TRUE) | grepl('Combination', file, fixed=TRUE)){
+      nn_comb_3 <- rbind(nn_comb_3, nn_temp_3)
+    }
+    else if(grepl('henry', file, fixed=TRUE)){
+      nn_dict_3 <- rbind(nn_dict_3, nn_temp_3)
+    }
+    else if(grepl('watson', file, fixed=TRUE)){
+      nn_watson_3 <- rbind(nn_watson_3, nn_temp_3)
+    }
+    else if(grepl('vader', file, fixed=TRUE)){
+      nn_vader_3 <- rbind(nn_vader_3, nn_temp_3)
+    }
+    else if(grepl('NoSentiment', file, fixed=TRUE)){
+      nn_no_3 <- rbind(nn_no_3, nn_temp_3)
+    }
+  }
+  else if(grepl('relative', file, fixed=TRUE)){
+    if(grepl('combination', file, fixed=TRUE)| grepl('Combination', file, fixed=TRUE)){
+      nn_comb_rel_3 <- rbind(nn_comb_rel_3, nn_temp_3)
+    }
+    else if(grepl('henry', file, fixed=TRUE)){
+      nn_dict_rel_3 <- rbind(nn_dict_rel_3, nn_temp_3)
+    }
+    else if(grepl('watson', file, fixed=TRUE)){
+      nn_watson_rel_3 <- rbind(nn_watson_rel_3, nn_temp_3)
+    }
+    else if(grepl('vader', file, fixed=TRUE)){
+      nn_vader_rel_3 <- rbind(nn_vader_rel_3, nn_temp_3)
+    }
+    else if(grepl('NoSentiment', file, fixed=TRUE)){
+      nn_no_rel_3 <- rbind(nn_no_rel_3, nn_temp_3)
+    }
+  }
+}
+
+# get the predictions for the minimum RMSE
+# here, we distinguish between the results for based on the minimum rmse on the training set, using the model returned by the cross-validation function, and separately re-training the model based on the lowest rmse on the training set
+
+
+# average_preds = FALSE
+
+nn_pred_comb_3 <- head(get_min_RMSE_predictions(nn_comb_3, average_preds), num_test - 2)
+
+nn_pred_watson_3 <- head(get_min_RMSE_predictions(nn_watson_3, average_preds), num_test - 2)
+
+nn_pred_vader_3 <- head(get_min_RMSE_predictions(nn_vader_3, average_preds), num_test - 2)
+
+nn_pred_dict_3 <- head(get_min_RMSE_predictions(nn_dict_3, average_preds), num_test - 2)
+
+nn_pred_no_3 <- head(get_min_RMSE_predictions(nn_no_3, average_preds), num_test - 2)
+
+# nn_temp_1 <- predictions[which(predictions$rmse_train == min(predictions$rmse_train)),]$y_hat_hypermodel_retrained
+#   nn_temp_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_temp_1)
+#   nn_temp_1 <- gsub('\\\n ',",", nn_temp_1)
+#   nn_temp_1 <- strsplit(nn_temp_1, ',')
+#   nn_temp_1 <- strsplit(nn_temp_1[[1]], ' ')
+#   nn_temp_1 <- lapply(nn_temp_1, function(z){ z[!is.na(z) & z != ""]})
+#   nn_temp_1 <- rapply(nn_temp_1, function(x) tail(x, 1))
+#   nn_temp_1 <- as.numeric(nn_temp_1)
+#   
+#   nn_temp_2 <- predictions[which(predictions$rmse_train == min(predictions$rmse_train)),]$y_hat
+#   nn_temp_2 <- gsub("\\[|\\]|\\[[|\\]]","",nn_temp_2)
+#   nn_temp_2 <- gsub('\\\n ',",", nn_temp_2)
+#   nn_temp_2 <- strsplit(nn_temp_2, ',')
+#   nn_temp_2 <- strsplit(nn_temp_2[[1]], ' ')
+#   nn_temp_2 <- lapply(nn_temp_2, function(z){ z[!is.na(z) & z != ""]})
+#   nn_temp_2 <- rapply(nn_temp_2, function(x) tail(x, 1))
+#   nn_temp_2 <- as.numeric(nn_temp_2)
+#   
+#   # nn_temp_train <- predictions[which(predictions$rmse_train == min(predictions$rmse_train)),]$y_hat_train
+#   # nn_temp_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_temp_train)
+#   # nn_temp_train <- gsub('\\\n ',",", nn_temp_train)
+#   # nn_temp_train <- strsplit(nn_temp_train, ',')
+#   # nn_temp_train <- strsplit(nn_temp_train[[1]], ' ')
+#   # nn_temp_train <- lapply(nn_temp_train, function(z){ z[!is.na(z) & z != ""]})
+#   # nn_temp_train <- rapply(nn_temp_train, function(x) tail(x, 1))
+#   # nn_temp_train <- as.numeric(nn_temp_train)
+# 
+#   if (average_preds==TRUE){
+#     nn_temp_pred <- (nn_temp_1 + nn_temp_2)/2
+#   } else{
+#     nn_temp_pred = nn_temp_2
+#   }
+#   
+#   nn_temp_pred
+
+```
+
+Third, for the 5 period forecasts:
+
+```{r nn}
+
+temp = list.files("Data/Run with forecasting 5 periods", pattern="*.csv")
+temp = list.files("C:/Users/Christian/Downloads/NewRun/", pattern="*.csv")
+
+dir_name <- "Data/Run with forecasting 5 periods/Direct Forecast/"
+temp = list.files(dir_name, pattern="*.csv")
+
+nn_comb_5 = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_watson_5 = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_dict_5 = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_vader_5 = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_no_5 = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+
+nn_comb_rel_5 = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_watson_rel_5 = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_dict_rel_5 = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_vader_rel_5 = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+nn_no_rel_5 = data.frame(X=integer(), optimizer=character(), init = character(), layer_out=integer(), patience=integer(), batch_size=integer(), dropout=numeric(), rmse=numeric(), rmse_hypermodel_retrained=numeric(), rmse_train=numeric(), y_hat=character(), y_hat_hypermodel_retrained=character(), y_hat_train=character())
+
+
+for (file in temp){
+  nn_temp_5 = read.csv(paste0(dir_name,file))
+  if(grepl('absolute', file, fixed=TRUE)){
+    if(grepl('combination', file, fixed=TRUE)|grepl('Combination', file, fixed=TRUE)){
+      nn_comb_5 <- rbind(nn_comb_5, nn_temp_5)
+    }
+    else if(grepl('henry', file, fixed=TRUE)){
+      nn_dict_5 <- rbind(nn_dict_5, nn_temp_5)
+    }
+    else if(grepl('watson', file, fixed=TRUE)){
+      nn_watson_5 <- rbind(nn_watson_5, nn_temp_5)
+    }
+    else if(grepl('vader', file, fixed=TRUE)){
+      nn_vader_5 <- rbind(nn_vader_5, nn_temp_5)
+    }
+    else if(grepl('NoSentiment', file, fixed=TRUE)){
+      nn_no_5 <- rbind(nn_no_5, nn_temp_5)
+    }
+  }
+  else if(grepl('relative', file, fixed=TRUE)){
+    if(grepl('combination', file, fixed=TRUE)|grepl('Combination', file, fixed=TRUE)){
+      nn_comb_rel_5 <- rbind(nn_comb_rel_5, nn_temp_5)
+    }
+    else if(grepl('henry', file, fixed=TRUE)){
+      nn_dict_rel_5 <- rbind(nn_dict_rel_5, nn_temp_5)
+    }
+    else if(grepl('watson', file, fixed=TRUE)){
+      nn_watson_rel_5 <- rbind(nn_watson_rel_5, nn_temp_5)
+    }
+    else if(grepl('vader', file, fixed=TRUE)){
+      nn_vader_rel_5 <- rbind(nn_vader_rel_5, nn_temp_5)
+    }
+    else if(grepl('NoSentiment', file, fixed=TRUE)){
+      nn_no_rel_5 <- rbind(nn_no_rel_5, nn_temp_5)
+    }
+  }
+}
+
+# get the predictions for the minimum RMSE
+# here, we distinguish between the results for based on the minimum rmse on the training set, using the model returned by the cross-validation function, and separately re-training the model based on the lowest rmse on the training set
+
+
+# average_preds = FALSE
+
+nn_pred_comb_5 <- head(get_min_RMSE_predictions(nn_comb_5, average_preds), num_test - 4)
+
+nn_pred_watson_5 <- head(get_min_RMSE_predictions(nn_watson_5, average_preds), num_test - 4)
+
+nn_pred_vader_5 <- head(get_min_RMSE_predictions(nn_vader_5, average_preds), num_test - 4)
+
+nn_pred_dict_5 <- head(get_min_RMSE_predictions(nn_dict_5, average_preds), num_test - 4)
+
+nn_pred_no_5 <- head(get_min_RMSE_predictions(nn_no_5, average_preds), num_test - 4)
+
+```
+
+
+## Neural Network Models Predicting Relative Price Change
+
+```{r nn_relative}
+
+
+# get the predictions for the minimum RMSE
+# nn_pred <- nn_comb_rel[which(nn_comb_rel$rmse_train == min(nn_comb_rel$rmse_train)),]$y_hat_hypermodel_retrained
+# 
+# nn_pred <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred)
+# nn_pred <- gsub('\\\n ',",", nn_pred)
+# nn_pred <- strsplit(nn_pred, ',')
+# nn_pred <- as.numeric(nn_pred[[1]])
+# 
+# nn_pred_1 <- nn_comb_rel[which(nn_comb_rel$rmse_train == min(nn_comb_rel$rmse_train)),]$y_hat
+# nn_pred_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_1)
+# nn_pred_1 <- gsub('\\\n ',",", nn_pred_1)
+# nn_pred_1 <- strsplit(nn_pred_1, ',')
+# nn_pred_1 <- as.numeric(nn_pred_1[[1]])
+# 
+# nn_pred_train <- nn_comb_rel[which(nn_comb_rel$rmse_train == min(nn_comb_rel$rmse_train)),]$y_hat_train
+# nn_pred_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_train)
+# nn_pred_train <- gsub('\\\n ',",", nn_pred_train)
+# nn_pred_train <- strsplit(nn_pred_train, ',')
+# nn_pred_train <- as.numeric(nn_pred_train[[1]])
+# nn_pred_comb_rel_train <- nn_pred_train
+# 
+# if (average_preds==TRUE){
+#   nn_pred <- (nn_pred + nn_pred_1)/2
+# } else{
+#   nn_pred = nn_pred_1
+# }
+# 
+# nn_pred_comb_rel <- nn_pred
+# 
+# nn_pred <- nn_watson_rel[which(nn_watson_rel$rmse_train == min(nn_watson_rel$rmse_train)),]$y_hat_hypermodel_retrained
+# nn_pred <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred)
+# nn_pred <- gsub('\\\n ',",", nn_pred)
+# nn_pred <- strsplit(nn_pred, ',')
+# nn_pred <- as.numeric(nn_pred[[1]])
+# 
+# nn_pred_1 <- nn_watson_rel[which(nn_watson_rel$rmse_train == min(nn_watson_rel$rmse_train)),]$y_hat
+# nn_pred_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_1)
+# nn_pred_1 <- gsub('\\\n ',",", nn_pred_1)
+# nn_pred_1 <- strsplit(nn_pred_1, ',')
+# nn_pred_1 <- as.numeric(nn_pred_1[[1]])
+# 
+# nn_pred_train <- nn_watson_rel[which(nn_watson_rel$rmse_train == min(nn_watson_rel$rmse_train)),]$y_hat_train
+# nn_pred_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_train)
+# nn_pred_train <- gsub('\\\n ',",", nn_pred_train)
+# nn_pred_train <- strsplit(nn_pred_train, ',')
+# nn_pred_train <- as.numeric(nn_pred_train[[1]])
+# nn_pred_watson_rel_train <- nn_pred_train
+# 
+# if (average_preds==TRUE){
+#   nn_pred <- (nn_pred + nn_pred_1)/2
+# } else{
+#   nn_pred = nn_pred_1
+# }
+# 
+# nn_pred_watson_rel <- nn_pred
+# 
+# nn_pred <- nn_vader_rel[which(nn_vader_rel$rmse_train == min(nn_vader_rel$rmse_train)),]$y_hat_hypermodel_retrained
+# 
+# nn_pred <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred)
+# nn_pred <- gsub('\\\n ',",", nn_pred)
+# nn_pred <- strsplit(nn_pred, ',')
+# nn_pred <- as.numeric(nn_pred[[1]])
+# 
+# nn_pred_1 <- nn_vader_rel[which(nn_vader_rel$rmse_train == min(nn_vader_rel$rmse_train)),]$y_hat
+# nn_pred_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_1)
+# nn_pred_1 <- gsub('\\\n ',",", nn_pred_1)
+# nn_pred_1 <- strsplit(nn_pred_1, ',')
+# nn_pred_1 <- as.numeric(nn_pred_1[[1]])
+# 
+# nn_pred_train <- nn_vader_rel[which(nn_vader_rel$rmse_train == min(nn_vader_rel$rmse_train)),]$y_hat_train
+# nn_pred_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_train)
+# nn_pred_train <- gsub('\\\n ',",", nn_pred_train)
+# nn_pred_train <- strsplit(nn_pred_train, ',')
+# nn_pred_train <- as.numeric(nn_pred_train[[1]])
+# nn_pred_vader_rel_train <- nn_pred_train
+# 
+# if (average_preds==TRUE){
+#   nn_pred <- (nn_pred + nn_pred_1)/2
+# } else{
+#   nn_pred = nn_pred_1
+# }
+# 
+# nn_pred_vader_rel <- nn_pred
+# 
+# nn_pred <- nn_dict_rel[which(nn_dict_rel$rmse_train == min(nn_dict_rel$rmse_train)),]$y_hat_hypermodel_retrained
+# nn_pred <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred)
+# nn_pred <- gsub('\\\n ',",", nn_pred)
+# nn_pred <- strsplit(nn_pred, ',')
+# nn_pred <- as.numeric(nn_pred[[1]])
+# 
+# nn_pred_1 <- nn_dict_rel[which(nn_dict_rel$rmse_train == min(nn_dict_rel$rmse_train)),]$y_hat
+# nn_pred_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_1)
+# nn_pred_1 <- gsub('\\\n ',",", nn_pred_1)
+# nn_pred_1 <- strsplit(nn_pred_1, ',')
+# nn_pred_1 <- as.numeric(nn_pred_1[[1]])
+# 
+# nn_pred_train <- nn_dict_rel[which(nn_dict_rel$rmse_train == min(nn_dict_rel$rmse_train)),]$y_hat_train
+# nn_pred_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_train)
+# nn_pred_train <- gsub('\\\n ',",", nn_pred_train)
+# nn_pred_train <- strsplit(nn_pred_train, ',')
+# nn_pred_train <- as.numeric(nn_pred_train[[1]])
+# 
+# nn_pred_dict_rel_train <- nn_pred_train
+# 
+# if (average_preds==TRUE){
+#   nn_pred <- (nn_pred + nn_pred_1)/2
+# } else{
+#   nn_pred = nn_pred_1
+# }
+# 
+# nn_pred_dict_rel <- nn_pred
+# 
+# nn_pred <- nn_no_rel[which(nn_no_rel$rmse_train == min(nn_no_rel$rmse_train)),]$y_hat_hypermodel_retrained
+# nn_pred <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred)
+# nn_pred <- gsub('\\\n ',",", nn_pred)
+# nn_pred <- strsplit(nn_pred, ',')
+# nn_pred <- as.numeric(nn_pred[[1]])
+# 
+# nn_pred_1 <- nn_no_rel[which(nn_no_rel$rmse_train == min(nn_no_rel$rmse_train)),]$y_hat
+# nn_pred_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_1)
+# nn_pred_1 <- gsub('\\\n ',",", nn_pred_1)
+# nn_pred_1 <- strsplit(nn_pred_1, ',')
+# nn_pred_1 <- as.numeric(nn_pred_1[[1]])
+# 
+# nn_pred_train <- nn_no_rel[which(nn_no_rel$rmse_train == min(nn_no_rel$rmse_train)),]$y_hat_train
+# nn_pred_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_train)
+# nn_pred_train <- gsub('\\\n ',",", nn_pred_train)
+# nn_pred_train <- strsplit(nn_pred_train, ',')
+# nn_pred_train <- as.numeric(nn_pred_train[[1]])
+# 
+# nn_pred_no_rel_train <- nn_pred_train
+# 
+# if (average_preds==TRUE){
+#   nn_pred <- (nn_pred + nn_pred_1)/2
+# } else{
+#   nn_pred = nn_pred_1
+# }
+# 
+# nn_pred_no_rel <- nn_pred
+
+# 1 Period Forecast
+nn_pred_comb_rel <- get_min_RMSE_predictions(nn_comb_rel, average_preds)
+
+nn_pred_watson_rel <- get_min_RMSE_predictions(nn_watson_rel, average_preds)
+
+nn_pred_vader_rel <- get_min_RMSE_predictions(nn_vader_rel, average_preds)
+
+nn_pred_dict_rel <- get_min_RMSE_predictions(nn_dict_rel, average_preds)
+
+nn_pred_no_rel <- get_min_RMSE_predictions(nn_no_rel, average_preds)
+
+# 3 Period Forecast
+nn_pred_comb_rel_3 <- get_min_RMSE_predictions(nn_comb_rel_3, average_preds)
+
+nn_pred_watson_rel_3 <- get_min_RMSE_predictions(nn_watson_rel_3, average_preds)
+
+nn_pred_vader_rel_3 <- get_min_RMSE_predictions(nn_vader_rel_3, average_preds)
+
+nn_pred_dict_rel_3 <- get_min_RMSE_predictions(nn_dict_rel_3, average_preds)
+
+nn_pred_no_rel_3 <- get_min_RMSE_predictions(nn_no_rel_3, average_preds)
+
+# 5 Period Forecast
+nn_pred_comb_rel_5 <- get_min_RMSE_predictions(nn_comb_rel_5, average_preds)
+
+nn_pred_watson_rel_5 <- get_min_RMSE_predictions(nn_watson_rel_5, average_preds)
+
+nn_pred_vader_rel_5 <- get_min_RMSE_predictions(nn_vader_rel_5, average_preds)
+
+nn_pred_dict_rel_5 <- get_min_RMSE_predictions(nn_dict_rel_5, average_preds)
+
+nn_pred_no_rel_5 <- get_min_RMSE_predictions(nn_no_rel_5, average_preds)
+
+
+
+# for the relative prediction, an earlier version had an incorrect timeshift. this is corrected here.
+
+NN_Comb <- tail(nn_pred_comb,num_test)
+NN_Vader <- tail(nn_pred_vader,num_test)
+NN_Dict <- tail(nn_pred_dict,num_test)
+NN_Watson <- tail(nn_pred_watson,num_test)
+NN_No <- tail(nn_pred_no,num_test)
+
+NN_Comb_Rel <- tail(nn_pred_comb_rel,num_test)
+NN_Vader_Rel <- tail(nn_pred_vader_rel,num_test)
+NN_Dict_Rel <- tail(nn_pred_dict_rel,num_test)
+NN_Watson_Rel <- tail(nn_pred_watson_rel,num_test)
+NN_No_Rel <- tail(nn_pred_no_rel,num_test)
+
+# 3 period forecasts
+num_test_3 <- num_test - 2
+NN_Comb_3 <- tail(nn_pred_comb_3,num_test_3)
+NN_Vader_3 <- tail(nn_pred_vader_3,num_test_3)
+NN_Dict_3 <- tail(nn_pred_dict_3,num_test_3)
+NN_Watson_3 <- tail(nn_pred_watson_3,num_test_3)
+NN_No_3 <- tail(nn_pred_no_3,num_test_3)
+
+NN_Comb_Rel_3 <- tail(nn_pred_comb_rel_3,num_test_3)
+NN_Vader_Rel_3 <- tail(nn_pred_vader_rel_3,num_test_3)
+NN_Dict_Rel_3 <- tail(nn_pred_dict_rel_3,num_test_3)
+NN_Watson_Rel_3 <- tail(nn_pred_watson_rel_3,num_test_3)
+NN_No_Rel_3 <- tail(nn_pred_no_rel_3,num_test_3)
+
+
+# 5 period forecasts
+num_test_5 <- num_test - 4
+NN_Comb_5 <- tail(nn_pred_comb_5,num_test_5)
+NN_Vader_5 <- tail(nn_pred_vader_5,num_test_5)
+NN_Dict_5 <- tail(nn_pred_dict_5,num_test_5)
+NN_Watson_5 <- tail(nn_pred_watson_5,num_test_5)
+NN_No_5 <- tail(nn_pred_no_5,num_test_5)
+
+NN_Comb_Rel_5 <- tail(nn_pred_comb_rel_5,num_test_5)
+NN_Vader_Rel_5 <- tail(nn_pred_vader_rel_5,num_test_5)
+NN_Dict_Rel_5 <- tail(nn_pred_dict_rel_5,num_test_5)
+NN_Watson_Rel_5 <- tail(nn_pred_watson_rel_5,num_test_5)
+NN_No_Rel_5 <- tail(nn_pred_no_rel_5,num_test_5)
+
+```
+
+
+## Merge Predictions together
+
+We have some observations missing in the limited spread data, so we need to account for that.
+Let's start with the 1-period ahead predictions, then add the 3- and 5-period forecasts in separate tables.
+
+```{r merge}
+
+test_data_with_preds <- cbind(test_data %>%  slice_head(n = num_test), "NoChange"=y_hat_nochange_all, "Var_Comb" = pred_var_1_all, "Var_Dict" = pred_var_1_dict, "Var_Vader" = pred_var_1_vader, "Var_Watson" = pred_var_1_watson, "Var_No" = pred_var_no_1, "NN_Comb"=NN_Comb, "NN_Dict"=NN_Dict, "NN_Vader"=NN_Vader, "NN_Watson"=NN_Watson, "NN_No"=NN_No, "NN_Comb_Rel"=NN_Comb_Rel, "NN_Dict_Rel"=NN_Dict_Rel, "NN_Vader_Rel"=NN_Vader_Rel, "NN_Watson_Rel"=NN_Watson_Rel, "NN_No_Rel"=NN_No_Rel)
+
+test_data_spread$Date <- as.Date(test_data_spread$Date)
+test_data_with_preds$Date <- as.Date(test_data_with_preds$Date)
+
+test_data_merge <- merge(test_data_with_preds, test_data_spread, by='Date', all = TRUE)
+
+test_data_merge$y_true <- as.numeric(test_data_merge$WTI)
+
+# 3 period forecast
+test_data_with_preds_3 <- cbind(test_data %>% slice_head(n = num_test - 2), "NoChange"=y_hat_nochange_all_3, "Var_Comb" = pred_var_3_all, "Var_Dict" = pred_var_3_dict, "Var_Vader" = pred_var_3_vader, "Var_Watson" = pred_var_3_watson, "Var_No" = pred_var_no_3, "NN_Comb"=NN_Comb_3, "NN_Dict"=NN_Dict_3, "NN_Vader"=NN_Vader_3, "NN_Watson"=NN_Watson_3, "NN_No"=NN_No_3, "NN_Comb_Rel"=NN_Comb_Rel_3, "NN_Dict_Rel"=NN_Dict_Rel_3, "NN_Vader_Rel"=NN_Vader_Rel_3, "NN_Watson_Rel"=NN_Watson_Rel_3, "NN_No_Rel"=NN_No_Rel_3)
+
+test_data_with_preds_3$Date <- as.Date(test_data_with_preds_3$Date)
+test_data_merge_3 <- merge(test_data_with_preds_3, test_data_spread, by='Date', all = TRUE)
+
+test_data_merge_3$y_true <- as.numeric(lead(test_data$WTI,2))
+
+
+# 5 period forecast
+test_data_with_preds_5 <- cbind(test_data %>% slice_head(n = num_test - 4), "NoChange"=y_hat_nochange_all_5, "Var_Comb" = pred_var_5_all, "Var_Dict" = pred_var_5_dict, "Var_Vader" = pred_var_5_vader, "Var_Watson" = pred_var_5_watson, "Var_No" = pred_var_no_5, "NN_Comb"=NN_Comb_5, "NN_Dict"=NN_Dict_5, "NN_Vader"=NN_Vader_5, "NN_Watson"=NN_Watson_5, "NN_No"=NN_No_5, "NN_Comb_Rel"=NN_Comb_Rel_5, "NN_Dict_Rel"=NN_Dict_Rel_5, "NN_Vader_Rel"=NN_Vader_Rel_5, "NN_Watson_Rel"=NN_Watson_Rel_5, "NN_No_Rel"=NN_No_Rel_5)
+
+test_data_with_preds_5$Date <- as.Date(test_data_with_preds_5$Date)
+
+test_data_merge_5 <- merge(test_data_with_preds_5, test_data_spread, by='Date', all = TRUE)
+
+test_data_merge_5$y_true <- as.numeric(lead(test_data$WTI,4) )
+
+
+```
+
+
+## Calculating RMSEs
+
+```{r rmse}
+
+y <- y_true_1
+
+rmse_nochange <- sqrt(mean((y - y_hat_nochange_all)^2))
+
+rmse_var_all <- sqrt(mean((y - pred_var_1_all)^2))
+rmse_var_dict <- sqrt(mean((y - pred_var_1_dict)^2))
+rmse_var_vader <- sqrt(mean((y - pred_var_1_vader)^2))
+rmse_var_watson <- sqrt(mean((y - pred_var_1_watson)^2))
+rmse_var_no <- sqrt(mean((y - pred_var_no_1)^2))
+
+rmse_nn_all <- sqrt(mean((y - nn_pred_comb)^2))
+rmse_nn_vader <- sqrt(mean((y - nn_pred_vader)^2))
+rmse_nn_dict <- sqrt(mean((y - nn_pred_dict)^2))
+rmse_nn_watson <- sqrt(mean((y - nn_pred_watson)^2))
+rmse_nn_no <- sqrt(mean((y - nn_pred_no)^2))
+
+rmse_nn_all_rel <- sqrt(mean((y - nn_pred_comb_rel)^2))
+rmse_nn_vader_rel <- sqrt(mean((y - nn_pred_vader_rel)^2))
+rmse_nn_dict_rel <- sqrt(mean((y - nn_pred_dict_rel)^2))
+rmse_nn_watson_rel <- sqrt(mean((y - nn_pred_watson_rel)^2))
+rmse_nn_no_rel <- sqrt(mean((y - nn_pred_no_rel)^2))
+
+# for the spread-based models, we can convert the real_wti predictions to the actual wti predictions by including the inflation rate 
+y_true_spread <- limited_test_data$real_wti*limited_test_data$inflation_2015/100
+
+rmse_limited_spread <- sqrt(mean((y_true_spread - (limited_test_data$p_hat_shifted*limited_test_data$inflation_2015/100))^2))
+
+y_true_limited_spread <- test_data_spread_limited$real_wti*test_data_spread_limited$inflation_2015/100
+
+rmse_limited_training_spread <- sqrt(mean((y_true_limited_spread - (test_data_spread_limited$p_hat_shifted*test_data_spread_limited$inflation_2015/100))^2))
+
+# then, for 3 period forecasts
+
+y <- y_true_3
+
+rmse_nochange_3 <- sqrt(mean((y - y_hat_nochange_all_3)^2))
+
+rmse_var_all_3 <- sqrt(mean((y - pred_var_3_all)^2))
+rmse_var_dict_3 <- sqrt(mean((y - pred_var_3_dict)^2))
+rmse_var_vader_3 <- sqrt(mean((y - pred_var_3_vader)^2))
+rmse_var_watson_3 <- sqrt(mean((y - pred_var_3_watson)^2))
+rmse_var_no_3 <- sqrt(mean((y - pred_var_no_3)^2))
+
+rmse_nn_all_3 <- sqrt(mean((y - nn_pred_comb_3)^2))
+rmse_nn_vader_3 <- sqrt(mean((y - nn_pred_vader_3)^2))
+rmse_nn_dict_3 <- sqrt(mean((y - nn_pred_dict_3)^2))
+rmse_nn_watson_3 <- sqrt(mean((y - nn_pred_watson_3)^2))
+rmse_nn_no_3 <- sqrt(mean((y - nn_pred_no_3)^2))
+
+rmse_nn_all_rel_3 <- sqrt(mean((y - nn_pred_comb_rel_3)^2))
+rmse_nn_vader_rel_3 <- sqrt(mean((y - nn_pred_vader_rel_3)^2))
+rmse_nn_dict_rel_3 <- sqrt(mean((y - nn_pred_dict_rel_3)^2))
+rmse_nn_watson_rel_3 <- sqrt(mean((y - nn_pred_watson_rel_3)^2))
+rmse_nn_no_rel_3 <- sqrt(mean((y - nn_pred_no_rel_3)^2))
+
+y_true_spread_3 <- tail(limited_test_data$real_wti*limited_test_data$inflation_2015/100, nrow(limited_test_data)-2)
+
+rmse_limited_spread_3 <- sqrt(mean((y_true_spread_3 - head(limited_test_data$p_hat_shifted*limited_test_data$inflation_2015/100, nrow(limited_test_data)-2))^2))
+
+y_true_limited_spread_3 <- tail(test_data_spread_limited$real_wti*test_data_spread_limited$inflation_2015/100, nrow(test_data_spread_limited)-2)
+
+rmse_limited_training_spread_3 <- sqrt(mean((y_true_limited_spread_3 - head(test_data_spread_limited$p_hat_shifted*test_data_spread_limited$inflation_2015/100, nrow(test_data_spread_limited)-2))^2))
+
+
+# and for 5 period forecasts
+y <- y_true_5
+
+rmse_nochange_5 <- sqrt(mean((y - y_hat_nochange_all_5)^2))
+
+rmse_var_all_5 <- sqrt(mean((y - pred_var_5_all)^2))
+rmse_var_dict_5 <- sqrt(mean((y - pred_var_5_dict)^2))
+rmse_var_vader_5 <- sqrt(mean((y - pred_var_5_vader)^2))
+rmse_var_watson_5 <- sqrt(mean((y - pred_var_5_watson)^2))
+rmse_var_no_5 <- sqrt(mean((y - pred_var_no_5)^2))
+
+rmse_nn_all_5 <- sqrt(mean((y - nn_pred_comb_5)^2))
+rmse_nn_vader_5 <- sqrt(mean((y - nn_pred_vader_5)^2))
+rmse_nn_dict_5 <- sqrt(mean((y - nn_pred_dict_5)^2))
+rmse_nn_watson_5 <- sqrt(mean((y - nn_pred_watson_5)^2))
+rmse_nn_no_5 <- sqrt(mean((y - nn_pred_no_5)^2))
+
+rmse_nn_all_rel_5 <- sqrt(mean((y - nn_pred_comb_rel_5)^2))
+rmse_nn_vader_rel_5 <- sqrt(mean((y - nn_pred_vader_rel_5)^2))
+rmse_nn_dict_rel_5 <- sqrt(mean((y - nn_pred_dict_rel_5)^2))
+rmse_nn_watson_rel_5 <- sqrt(mean((y - nn_pred_watson_rel_5)^2))
+rmse_nn_no_rel_5 <- sqrt(mean((y - nn_pred_no_rel_5)^2))
+
+y_true_spread_5 <- tail(limited_test_data$real_wti*limited_test_data$inflation_2015/100, nrow(limited_test_data)-4)
+
+rmse_limited_spread_5 <- sqrt(mean((y_true_spread_5 - head(limited_test_data$p_hat_shifted*limited_test_data$inflation_2015/100, nrow(limited_test_data)-4))^2))
+
+y_true_limited_spread_5 <- tail(test_data_spread_limited$real_wti*test_data_spread_limited$inflation_2015/100, nrow(test_data_spread_limited)-4)
+
+rmse_limited_training_spread_5 <- sqrt(mean((y_true_limited_spread_5 - head(test_data_spread_limited$p_hat_shifted*test_data_spread_limited$inflation_2015/100, nrow(test_data_spread_limited)-4))^2))
+
+
+```
+
+## Calculate MAPEs
+
+```{r mape}
+library(forecast)
+
+y <- y_true_1
+mape_nochange <- accuracy(y_hat_nochange_all,y)[5]
+
+mape_var_all <- accuracy(pred_var_1_all,y)[5]
+mape_var_vader <- accuracy(pred_var_1_vader,y)[5]
+mape_var_dict <- accuracy(pred_var_1_dict,y)[5]
+mape_var_watson <- accuracy(pred_var_1_watson,y)[5]
+mape_var_no <- accuracy(pred_var_no,y)[5]
+
+mape_nn_all <- accuracy(nn_pred_comb,y)[5]
+mape_nn_vader <- accuracy(nn_pred_vader,y)[5]
+mape_nn_dict <- accuracy(nn_pred_dict,y)[5]
+mape_nn_watson <- accuracy(nn_pred_watson,y)[5]
+mape_nn_no <- accuracy(nn_pred_no,y)[5]
+
+mape_nn_all_rel <- accuracy(nn_pred_comb_rel,y)[5]
+mape_nn_vader_rel <- accuracy(nn_pred_vader_rel,y)[5]
+mape_nn_dict_rel <- accuracy(nn_pred_dict_rel,y)[5]
+mape_nn_watson_rel <- accuracy(nn_pred_watson_rel,y)[5]
+mape_nn_no_rel <- accuracy(nn_pred_no_rel,y)[5]
+
+mape_spread <- accuracy((limited_test_data$p_hat_shifted*limited_test_data$inflation_2015/100), (limited_test_data$real_wti*limited_test_data$inflation_2015/100))[5]
+
+mape_limited_spread <- accuracy((test_data_spread_limited$p_hat_shifted*test_data_spread_limited$inflation_2015/100), (test_data_spread_limited$real_wti*test_data_spread_limited$inflation_2015/100))[5]
+
+# then, for 3 periods
+y <- y_true_3
+mape_nochange_3 <- accuracy(y_hat_nochange_all_3,y)[5]
+
+mape_var_all_3 <- accuracy(pred_var_3_all,y)[5]
+mape_var_vader_3 <- accuracy(pred_var_3_vader,y)[5]
+mape_var_dict_3 <- accuracy(pred_var_3_dict,y)[5]
+mape_var_watson_3 <- accuracy(pred_var_3_watson,y)[5]
+mape_var_no_3 <- accuracy(pred_var_no_3,y)[5]
+
+mape_nn_all_3 <- accuracy(nn_pred_comb_3,y)[5]
+mape_nn_vader_3 <- accuracy(nn_pred_vader_3,y)[5]
+mape_nn_dict_3 <- accuracy(nn_pred_dict_3,y)[5]
+mape_nn_watson_3 <- accuracy(nn_pred_watson_3,y)[5]
+mape_nn_no_3 <- accuracy(nn_pred_no_3,y)[5]
+
+mape_nn_all_rel_3 <- accuracy(nn_pred_comb_rel_3,y)[5]
+mape_nn_vader_rel_3 <- accuracy(nn_pred_vader_rel_3,y)[5]
+mape_nn_dict_rel_3 <- accuracy(nn_pred_dict_rel_3,y)[5]
+mape_nn_watson_rel_3 <- accuracy(nn_pred_watson_rel_3,y)[5]
+mape_nn_no_rel_3 <- accuracy(nn_pred_no_rel_3,y)[5]
+
+mape_spread_3 <- accuracy((head(limited_test_data$p_hat_shifted*limited_test_data$inflation_2015/100, nrow(limited_test_data)-2)), y_true_spread_3)[5]
+
+mape_limited_spread_3 <- accuracy((head(test_data_spread_limited$p_hat_shifted*test_data_spread_limited$inflation_2015/100, nrow(test_data_spread_limited)-2)), y_true_limited_spread_3)[5]
+
+
+# then, for 5 periods
+y <- y_true_5
+mape_nochange_5 <- accuracy(y_hat_nochange_all_5,y)[5]
+
+mape_var_all_5 <- accuracy(pred_var_5_all,y)[5]
+mape_var_vader_5 <- accuracy(pred_var_5_vader,y)[5]
+mape_var_dict_5 <- accuracy(pred_var_5_dict,y)[5]
+mape_var_watson_5 <- accuracy(pred_var_5_watson,y)[5]
+mape_var_no_5 <- accuracy(pred_var_no_5,y)[5]
+
+mape_nn_all_5 <- accuracy(nn_pred_comb_5,y)[5]
+mape_nn_vader_5 <- accuracy(nn_pred_vader_5,y)[5]
+mape_nn_dict_5 <- accuracy(nn_pred_dict_5,y)[5]
+mape_nn_watson_5 <- accuracy(nn_pred_watson_5,y)[5]
+mape_nn_no_5 <- accuracy(nn_pred_no_5,y)[5]
+
+mape_nn_all_rel_5 <- accuracy(nn_pred_comb_rel_5,y)[5]
+mape_nn_vader_rel_5 <- accuracy(nn_pred_vader_rel_5,y)[5]
+mape_nn_dict_rel_5 <- accuracy(nn_pred_dict_rel_5,y)[5]
+mape_nn_watson_rel_5 <- accuracy(nn_pred_watson_rel_5,y)[5]
+mape_nn_no_rel_5 <- accuracy(nn_pred_no_rel_5,y)[5]
+
+mape_spread_5 <- accuracy((head(limited_test_data$p_hat_shifted*limited_test_data$inflation_2015/100, nrow(limited_test_data)-4)), y_true_spread_5)[5]
+
+mape_limited_spread_5 <- accuracy((head(test_data_spread_limited$p_hat_shifted*test_data_spread_limited$inflation_2015/100, nrow(test_data_spread_limited)-4)), y_true_limited_spread_5)[5]
+
+
+```
+
+## Create Results Dataframe
+```{r resultsDF}
+
+results_df <- data.frame('Model'=c('NoChange',"Var_Comb","Var_Watson","Var_Dict","Var_Vader","Var_No","NN_Comb","NN_Watson","NN_Dict","NN_Vader", "NN_No","NN_Comb_Rel","NN_Watson_Rel","NN_Dict_Rel","NN_Vader_Rel", "NN_No_Rel"), 
+                         'RMSE'=c(rmse_nochange, rmse_var_all, rmse_var_watson, rmse_var_dict, rmse_var_vader, rmse_var_no, rmse_nn_all, rmse_nn_watson, rmse_nn_dict, rmse_nn_vader, rmse_nn_no, rmse_nn_all_rel, rmse_nn_watson_rel, rmse_nn_dict_rel, rmse_nn_vader_rel, rmse_nn_no_rel), 'MAPE'=  c(mape_nochange, mape_var_all, mape_var_watson, mape_var_dict, mape_var_vader, mape_var_no, mape_nn_all, mape_nn_watson, mape_nn_dict, mape_nn_vader, mape_nn_no, mape_nn_all_rel, mape_nn_watson_rel, mape_nn_dict_rel, mape_nn_vader_rel, mape_nn_no_rel))
+
+predictions_df <- data.frame('NoChange' = y_hat_nochange_all, 'Var_Comb' = pred_var_1_all, 'Var_Watson' = pred_var_1_watson, 'Var_Dict' = pred_var_1_dict, "Var_Vader" = pred_var_1_vader, "Var_No" = pred_var_no, "NN_Comb" = nn_pred_comb, "NN_Watson" = nn_pred_watson, "NN_Dict" = nn_pred_dict, "NN_Vader" = nn_pred_vader, "NN_No" = nn_pred_no, "NN_Comb_Rel" = nn_pred_comb_rel, "NN_Watson_Rel" = nn_pred_watson_rel, "NN_Dict_Rel" = nn_pred_dict_rel, "NN_Vader_Rel" = nn_pred_vader_rel, "NN_No_Rel" = nn_pred_no_rel, "y_True" = y_true_1)
+
+predictions_df <- test_data_merge %>% 
+  dplyr::select(NoChange, Var_Comb, Var_Watson, Var_Dict, Var_Vader, Var_No,
+         NN_Comb, NN_Watson, NN_Dict, NN_Vader, NN_No,
+         NN_Comb_Rel, NN_Watson_Rel, NN_Dict_Rel, NN_Vader_Rel, NN_No_Rel,
+         y_true, Pred1, PredLimited1) %>% 
+  slice_head(n=num_test) %>% 
+  rename("y_True" = y_true)
+
+# for 3 forecast periods
+results_df_3 <- data.frame('Model'=c('NoChange',"Var_Comb","Var_Watson","Var_Dict","Var_Vader","Var_No","NN_Comb","NN_Watson","NN_Dict","NN_Vader", "NN_No","NN_Comb_Rel","NN_Watson_Rel","NN_Dict_Rel","NN_Vader_Rel", "NN_No_Rel"), 
+                         'RMSE'=c(rmse_nochange_3, rmse_var_all_3, rmse_var_watson_3, rmse_var_dict_3, rmse_var_vader_3, rmse_var_no_3, rmse_nn_all_3, rmse_nn_watson_3, rmse_nn_dict_3, rmse_nn_vader_3, rmse_nn_no_3, rmse_nn_all_rel_3, rmse_nn_watson_rel_3, rmse_nn_dict_rel_3, rmse_nn_vader_rel_3, rmse_nn_no_rel_3), 'MAPE'=  c(mape_nochange_3, mape_var_all_3, mape_var_watson_3, mape_var_dict_3, mape_var_vader_3, mape_var_no_3, mape_nn_all_3, mape_nn_watson_3, mape_nn_dict_3, mape_nn_vader_3, mape_nn_no_3, mape_nn_all_rel_3, mape_nn_watson_rel_3, mape_nn_dict_rel_3, mape_nn_vader_rel_3, mape_nn_no_rel_3))
+
+predictions_df_3 <- data.frame('NoChange' = y_hat_nochange_all_3, 'Var_Comb' = pred_var_3_all, 'Var_Watson' = pred_var_3_watson, 'Var_Dict' = pred_var_3_dict, "Var_Vader" = pred_var_3_vader, "Var_No" = pred_var_no_3, "NN_Comb" = nn_pred_comb_3, "NN_Watson" = nn_pred_watson_3, "NN_Dict" = nn_pred_dict_3, "NN_Vader" = nn_pred_vader_3, "NN_No" = nn_pred_no_3, "NN_Comb_Rel" = nn_pred_comb_rel_3, "NN_Watson_Rel" = nn_pred_watson_rel_3, "NN_Dict_Rel" = nn_pred_dict_rel_3, "NN_Vader_Rel" = nn_pred_vader_rel_3, "NN_No_Rel" = nn_pred_no_rel_3, "y_True" = y_true_3)
+
+predictions_df_3 <- test_data_merge_3 %>% 
+  dplyr::select(NoChange, Var_Comb, Var_Watson, Var_Dict, Var_Vader, Var_No,
+         NN_Comb, NN_Watson, NN_Dict, NN_Vader, NN_No,
+         NN_Comb_Rel, NN_Watson_Rel, NN_Dict_Rel, NN_Vader_Rel, NN_No_Rel,
+         y_true, Pred3, PredLimited3) %>% 
+  slice_head(n=num_test_3) %>% 
+  rename("y_True" = y_true)
+
+
+# for 5 forecast periods
+results_df_5 <- data.frame('Model'=c('NoChange',"Var_Comb","Var_Watson","Var_Dict","Var_Vader","Var_No","NN_Comb","NN_Watson","NN_Dict","NN_Vader", "NN_No","NN_Comb_Rel","NN_Watson_Rel","NN_Dict_Rel","NN_Vader_Rel", "NN_No_Rel"), 
+                         'RMSE'=c(rmse_nochange_5, rmse_var_all_5, rmse_var_watson_5, rmse_var_dict_5, rmse_var_vader_5, rmse_var_no_5, rmse_nn_all_5, rmse_nn_watson_5, rmse_nn_dict_5, rmse_nn_vader_5, rmse_nn_no_5, rmse_nn_all_rel_5, rmse_nn_watson_rel_5, rmse_nn_dict_rel_5, rmse_nn_vader_rel_5, rmse_nn_no_rel_5), 'MAPE'=  c(mape_nochange_5, mape_var_all_5, mape_var_watson_5, mape_var_dict_5, mape_var_vader_5, mape_var_no_5, mape_nn_all_5, mape_nn_watson_5, mape_nn_dict_5, mape_nn_vader_5, mape_nn_no_5, mape_nn_all_rel_5, mape_nn_watson_rel_5, mape_nn_dict_rel_5, mape_nn_vader_rel_5, mape_nn_no_rel_5))
+
+predictions_df_5 <- data.frame('NoChange' = y_hat_nochange_all_5, 'Var_Comb' = pred_var_5_all, 'Var_Watson' = pred_var_5_watson, 'Var_Dict' = pred_var_5_dict, "Var_Vader" = pred_var_5_vader, "Var_No" = pred_var_no_5, "NN_Comb" = nn_pred_comb_5, "NN_Watson" = nn_pred_watson_5, "NN_Dict" = nn_pred_dict_5, "NN_Vader" = nn_pred_vader_5, "NN_No" = nn_pred_no_5, "NN_Comb_Rel" = nn_pred_comb_rel_5, "NN_Watson_Rel" = nn_pred_watson_rel_5, "NN_Dict_Rel" = nn_pred_dict_rel_5, "NN_Vader_Rel" = nn_pred_vader_rel_5, "NN_No_Rel" = nn_pred_no_rel_5, "y_True" = y_true_5)
+
+predictions_df_5 <- test_data_merge_5 %>% 
+  dplyr::select(NoChange, Var_Comb, Var_Watson, Var_Dict, Var_Vader, Var_No,
+         NN_Comb, NN_Watson, NN_Dict, NN_Vader, NN_No,
+         NN_Comb_Rel, NN_Watson_Rel, NN_Dict_Rel, NN_Vader_Rel, NN_No_Rel,
+         y_true, Pred5, PredLimited5) %>% 
+  slice_head(n=num_test_5) %>% 
+  rename("y_True" = y_true)
+
+```
+
+
+## Ensemble Predictions
+
+We can also combine several different types of models and see if this improves performance
+
+```{r ensemble}
+
+## Note: this is done manually for now and potentially needs to be changed with new runs
+
+# first, get the best 3 rmse models and average their predictions
+# second, get the best 3 mape models and average their predictions
+
+# to do this, we need to first sort the results by rmse and then get the three best performing ones
+top_rmse_models <- results_df %>% 
+  slice_min(RMSE, n=3) %>% 
+  dplyr::select(Model) %>% 
+  pull()
+
+ensemble_pred_best_rmse <- rowMeans(test_data_merge[,top_rmse_models], na.rm = TRUE) %>% 
+  na.omit()
+  
+rmse_ensemble_best_rmse <- sqrt(mean((test_data$WTI - ensemble_pred_best_rmse)^2, na.rm = TRUE))
+
+mape_ensemble_best_rmse <- accuracy(ensemble_pred_best_rmse,test_data$WTI)[5]
+
+# next, we need to first sort the results by mape and then get the three best performing ones
+top_mape_models <- results_df %>% 
+  slice_min(MAPE, n=3) %>% 
+  dplyr::select(Model) %>% 
+  pull()
+
+ensemble_pred_best_mape <- rowMeans(test_data_merge[,top_mape_models], na.rm = TRUE) %>% 
+  na.omit()
+
+rmse_ensemble_best_mape <- sqrt(mean((test_data$WTI - ensemble_pred_best_mape)^2, na.rm=TRUE))
+
+mape_ensemble_best_mape <- accuracy(ensemble_pred_best_mape,test_data$WTI)[5]
+
+results_df[nrow(results_df)+1,] <- c('Ensemble_Best_RMSE', rmse_ensemble_best_rmse, mape_ensemble_best_rmse)
+
+results_df[nrow(results_df)+1,] <- c('Ensemble_Best_MAPE', rmse_ensemble_best_mape, mape_ensemble_best_mape)
+
+predictions_df["Ensemble_Best_RMSE"] <- ensemble_pred_best_rmse
+predictions_df["Ensemble_Best_MAPE"] <- ensemble_pred_best_mape
+test_data_merge["Ensemble_Best_RMSE"] <- ensemble_pred_best_rmse
+test_data_merge["Ensemble_Best_MAPE"] <- ensemble_pred_best_mape
+
+
+
+# then for 3 periods
+# to do this, we need to first sort the results by rmse and then get the three best performing ones
+top_rmse_models_3 <- results_df_3 %>% 
+  slice_min(RMSE, n=3) %>% 
+  dplyr::select(Model) %>% 
+  pull()
+
+ensemble_pred_best_rmse_3 <- rowMeans(test_data_merge_3 %>%  dplyr::select(all_of(top_rmse_models_3)), na.rm = TRUE) %>% 
+  na.omit()
+  
+rmse_ensemble_best_rmse_3 <- sqrt(mean((tail(test_data$WTI,num_test-2) - ensemble_pred_best_rmse_3)^2, na.rm = TRUE))
+
+mape_ensemble_best_rmse_3 <- accuracy(ensemble_pred_best_rmse_3,tail(test_data$WTI,num_test-2))[5]
+
+# next, we need to first sort the results by mape and then get the three best performing ones
+top_mape_models_3 <- results_df_3 %>% 
+  slice_min(MAPE, n=3) %>% 
+  dplyr::select(Model) %>% 
+  pull()
+
+ensemble_pred_best_mape_3 <- rowMeans(test_data_merge_3 %>%  dplyr::select(all_of(top_mape_models_3)), na.rm = TRUE) %>% 
+  na.omit()
+
+rmse_ensemble_best_mape_3 <- sqrt(mean((tail(test_data$WTI,num_test-2) - ensemble_pred_best_mape_3)^2, na.rm=TRUE))
+
+mape_ensemble_best_mape_3 <- accuracy(ensemble_pred_best_mape_3,tail(test_data$WTI,num_test-2))[5]
+
+results_df_3[nrow(results_df_3)+1,] <- c('Ensemble_Best_RMSE', rmse_ensemble_best_rmse_3, mape_ensemble_best_rmse_3)
+
+results_df_3[nrow(results_df_3)+1,] <- c('Ensemble_Best_MAPE', rmse_ensemble_best_mape_3, mape_ensemble_best_mape_3)
+
+predictions_df_3["Ensemble_Best_RMSE"] <- ensemble_pred_best_rmse_3
+predictions_df_3["Ensemble_Best_MAPE"] <- ensemble_pred_best_mape_3
+test_data_merge_3["Ensemble_Best_RMSE"] <- c(ensemble_pred_best_rmse_3, rep(NA,2))
+test_data_merge_3["Ensemble_Best_MAPE"] <- c(ensemble_pred_best_mape_3, rep(NA,2))
+
+
+# and for 5 forecast periods
+# next, we need to first sort the results by mape and then get the three best performing ones
+top_rmse_models_5 <- results_df_5 %>% 
+  slice_min(RMSE, n=3) %>% 
+  dplyr::select(Model) %>% 
+  pull()
+
+ensemble_pred_best_rmse_5 <- rowMeans(test_data_merge_5 %>%  dplyr::select(all_of(top_rmse_models_5)), na.rm = TRUE) %>% 
+  na.omit()
+  
+rmse_ensemble_best_rmse_5 <- sqrt(mean((tail(test_data$WTI,num_test-4) - ensemble_pred_best_rmse_5)^2, na.rm = TRUE))
+
+mape_ensemble_best_rmse_5 <- accuracy(ensemble_pred_best_rmse_5,tail(test_data$WTI,num_test-4))[5]
+
+top_mape_models_5 <- results_df_5 %>% 
+  slice_min(MAPE, n=3) %>% 
+  dplyr::select(Model) %>% 
+  pull()
+
+ensemble_pred_best_mape_5 <- rowMeans(test_data_merge_5 %>%   dplyr::select(all_of(top_mape_models_5)), na.rm = TRUE) %>% 
+  na.omit()
+
+rmse_ensemble_best_mape_5 <- sqrt(mean((tail(test_data$WTI,num_test-4) - ensemble_pred_best_mape_5)^2, na.rm=TRUE))
+
+mape_ensemble_best_mape_5 <- accuracy(ensemble_pred_best_mape_5,tail(test_data$WTI,num_test-4))[5]
+
+results_df_5[nrow(results_df_5)+1,] <- c('Ensemble_Best_RMSE', rmse_ensemble_best_rmse_5, mape_ensemble_best_rmse_5)
+
+results_df_5[nrow(results_df_5)+1,] <- c('Ensemble_Best_MAPE', rmse_ensemble_best_mape_5, mape_ensemble_best_mape_5)
+
+predictions_df_5["Ensemble_Best_RMSE"] <- ensemble_pred_best_rmse_5
+predictions_df_5["Ensemble_Best_MAPE"] <- ensemble_pred_best_mape_5
+
+test_data_merge_5["Ensemble_Best_RMSE"] <- c(ensemble_pred_best_rmse_5, rep(NA,4))
+test_data_merge_5["Ensemble_Best_MAPE"] <- c(ensemble_pred_best_mape_5, rep(NA,4))
+
+```
+
+
+## New: Running Diebold-Mariano Test for significant differences in forecasts
+
+We first calculate the respective forecast errors, then run pairwise comparisons using the DM test. For this, we need to make sure we have the same number of predictions
+
+```{r dm}
+library(forecast)
+
+test_data_merge_no_na <- test_data_merge %>% 
+  dplyr::select(-c(change_WTI_1 : WTIplus5)) %>% 
+  na.omit()
+
+y <- test_data_merge_no_na$y_true
+
+error_nochange <- y - test_data_merge_no_na$NoChange
+
+error_var_all <- y - test_data_merge_no_na$Var_Comb
+error_var_vader <- y - test_data_merge_no_na$Var_Vader
+error_var_dict <- y - test_data_merge_no_na$Var_Vader
+error_var_watson <- y - test_data_merge_no_na$Var_Watson
+error_var_no <- y - test_data_merge_no_na$Var_No
+
+error_nn_all <- y - test_data_merge_no_na$NN_Comb
+error_nn_vader <- y - test_data_merge_no_na$NN_Vader
+error_nn_dict <- y - test_data_merge_no_na$NN_Dict
+error_nn_watson <- y - test_data_merge_no_na$NN_Watson
+error_nn_no <- y - test_data_merge_no_na$NN_No
+
+error_nn_all_rel <- y - test_data_merge_no_na$NN_Comb_Rel
+error_nn_vader_rel <- y - test_data_merge_no_na$NN_Vader_Rel
+error_nn_dict_rel <- y - test_data_merge_no_na$NN_Dict_Rel
+error_nn_watson_rel <- y - test_data_merge_no_na$NN_Watson_Rel
+error_nn_no_rel <- y - test_data_merge_no_na$NN_No_Rel
+
+error_spread <- y - test_data_merge_no_na$Pred1
+
+error_limited_spread <- y - test_data_merge_no_na$PredLimited1
+
+error_ensemble_pred_best_mape <- y - test_data_merge_no_na$Ensemble_Best_MAPE
+error_ensemble_pred_best_rmse <- y - test_data_merge_no_na$Ensemble_Best_RMSE
+
+# then, run the DM tests
+# we look at all pairwise combinations and save the results from the tests
+test_df <- data.frame('FirstError'=character(), 'SecondError'=character(), 'p.value'=numeric(), 'p.value.less'=numeric(), 'p.value.greater'=numeric(), 'statistic'=numeric())
+
+pairwise_combinations <- function(object_list, test_df, list_of_names) {
+  n <- length(object_list)
+  return_df <- test_df
+  # Iterate through each pairwise combination
+  for (i in 1:(n -1)) {
+    for (j in (i+1):n) {
+      print(paste('i:', i, ' j:', j))
+      
+      if(! identical(object_list[[i]], object_list[[j]])){
+      
+        # Call the provided function on each pair of items
+        temp_dm_test <- dm.test(object_list[[i]], object_list[[j]])
+        temp_dm_test_less <- dm.test(object_list[[i]], object_list[[j]],alternative='less')
+        temp_dm_test_greater <- dm.test(object_list[[i]], object_list[[j]], alternative = 'greater')
+        temp_df <- data.frame("FirstError" = list_of_names[i], "SecondError" = list_of_names[j], "p.value"=unname(temp_dm_test$p.value), "p.value.less" = unname(temp_dm_test_less$p.value), "p.value.greater" = unname(temp_dm_test_greater$p.value), "statistic" = unname(temp_dm_test$statistic))
+        print(temp_df)
+        
+        return_df <- bind_rows(return_df, temp_df)
+      }
+      # test_df <- test_df %>% 
+      #  add_row(FirstError = list_of_names[i], SecondError = list_of_names[j], p.value=temp_dm_test$p.value, p.value.less = temp_dm_test_less$p.value, p.value.greater = temp_dm_test_greater$p.value, statistic = temp_dm_test$statistic)
+    }
+  }
+  return_df
+}
+
+names <- c("NoChange", "Var_Comb", "Var_Dict", "Var_No", "Var_Vader", "Var_Watson", "NN_Comb", "NN_Dict", "NN_No", "NN_Vader", "NN_Watson", "NN_Comb_Rel", "NN_Dict_Rel", "NN_No_Rel", "NN_Vader_Rel", "NN_Watson_Rel", "LimitedSpread", "LimitedTrainingSpread", "Ensemble_Best_RMSE", "Ensemble_Best_MAPE")
+
+result <- pairwise_combinations(list((error_nochange), (error_var_all), (error_var_dict), (error_var_no), (error_var_vader), (error_var_watson), (error_nn_all), (error_nn_dict), (error_nn_no), (error_nn_vader), (error_nn_watson), (error_nn_all_rel), (error_nn_dict_rel), (error_nn_no_rel), (error_nn_vader_rel), (error_nn_watson_rel), (error_spread), (error_limited_spread), (error_ensemble_pred_best_rmse), (error_ensemble_pred_best_mape)), test_df, names)
+
+dm.test(error_nn_all, error_nochange)
+dm.test(error_ensemble_pred_best_rmse, error_nochange)
+dm.test(error_ensemble_pred_best_mape, error_nochange)
+
+# and for 3 periods
+
+test_data_merge_no_na_3 <- test_data_merge_3 %>% 
+  dplyr::select(-c(change_WTI_1 : WTIplus5)) %>% 
+  na.omit()
+
+y <- test_data_merge_no_na_3$y_true
+
+error_nochange_3 <- y - test_data_merge_no_na_3$NoChange
+
+error_var_all_3 <- y - test_data_merge_no_na_3$Var_Comb
+error_var_vader_3 <- y - test_data_merge_no_na_3$Var_Vader
+error_var_dict_3 <- y - test_data_merge_no_na_3$Var_Vader
+error_var_watson_3 <- y - test_data_merge_no_na_3$Var_Watson
+error_var_no_3 <- y - test_data_merge_no_na_3$Var_No
+
+error_nn_all_3 <- y - test_data_merge_no_na_3$NN_Comb
+error_nn_vader_3 <- y - test_data_merge_no_na_3$NN_Vader
+error_nn_dict_3 <- y - test_data_merge_no_na_3$NN_Dict
+error_nn_watson_3 <- y - test_data_merge_no_na_3$NN_Watson
+error_nn_no_3 <- y - test_data_merge_no_na_3$NN_No
+
+error_nn_all_rel_3 <- y - test_data_merge_no_na_3$NN_Comb_Rel
+error_nn_vader_rel_3 <- y - test_data_merge_no_na_3$NN_Vader_Rel
+error_nn_dict_rel_3 <- y - test_data_merge_no_na_3$NN_Dict_Rel
+error_nn_watson_rel_3 <- y - test_data_merge_no_na_3$NN_Watson_Rel
+error_nn_no_rel_3 <- y - test_data_merge_no_na_3$NN_No_Rel
+
+error_spread_3 <- y - test_data_merge_no_na_3$Pred1
+
+error_limited_spread_3 <- y - test_data_merge_no_na_3$PredLimited1
+
+error_ensemble_pred_best_mape_3 <- y - test_data_merge_no_na_3$Ensemble_Best_MAPE
+error_ensemble_pred_best_rmse_3 <- y - test_data_merge_no_na_3$Ensemble_Best_RMSE
+
+test_df_3 <- data.frame('FirstError'=character(), 'SecondError'=character(), 'p.value'=numeric(), 'p.value.less'=numeric(), 'p.value.greater'=numeric(), 'statistic'=numeric())
+names <- c("NoChange", "Var_Comb", "Var_Dict", "Var_No", "Var_Vader", "Var_Watson", "NN_Comb", "NN_Dict", "NN_No", "NN_Vader", "NN_Watson", "NN_Comb_Rel", "NN_Dict_Rel", "NN_No_Rel", "NN_Vader_Rel", "NN_Watson_Rel", "LimitedSpread", "LimitedTrainingSpread", "Ensemble_Best_RMSE", "Ensemble_Best_MAPE")
+
+result_3 <- pairwise_combinations(list((error_nochange_3), (error_var_all_3), (error_var_dict_3), (error_var_no_3), (error_var_vader_3), (error_var_watson_3), (error_nn_all_3), (error_nn_dict_3), (error_nn_no_3), (error_nn_vader_3), (error_nn_watson_3), (error_nn_all_rel_3), (error_nn_dict_rel_3), (error_nn_no_rel_3), (error_nn_vader_rel_3), (error_nn_watson_rel_3), (error_spread_3), (error_limited_spread_3), (error_ensemble_pred_best_rmse_3), (error_ensemble_pred_best_mape_3)), test_df_3, names)
+
+# and for 5 periods
+
+test_data_merge_no_na_5 <- test_data_merge_5 %>% 
+  dplyr::select(-c(change_WTI_1 : WTIplus5)) %>% 
+  na.omit()
+
+y <- test_data_merge_no_na_5$y_true
+
+error_nochange_5 <- y - test_data_merge_no_na_5$NoChange
+
+error_var_all_5 <- y - test_data_merge_no_na_5$Var_Comb
+error_var_vader_5 <- y - test_data_merge_no_na_5$Var_Vader
+error_var_dict_5 <- y - test_data_merge_no_na_5$Var_Vader
+error_var_watson_5 <- y - test_data_merge_no_na_5$Var_Watson
+error_var_no_5 <- y - test_data_merge_no_na_5$Var_No
+
+error_nn_all_5 <- y - test_data_merge_no_na_5$NN_Comb
+error_nn_vader_5 <- y - test_data_merge_no_na_5$NN_Vader
+error_nn_dict_5 <- y - test_data_merge_no_na_5$NN_Dict
+error_nn_watson_5 <- y - test_data_merge_no_na_5$NN_Watson
+error_nn_no_5 <- y - test_data_merge_no_na_5$NN_No
+
+error_nn_all_rel_5 <- y - test_data_merge_no_na_5$NN_Comb_Rel
+error_nn_vader_rel_5 <- y - test_data_merge_no_na_5$NN_Vader_Rel
+error_nn_dict_rel_5 <- y - test_data_merge_no_na_5$NN_Dict_Rel
+error_nn_watson_rel_5 <- y - test_data_merge_no_na_5$NN_Watson_Rel
+error_nn_no_rel_5 <- y - test_data_merge_no_na_5$NN_No_Rel
+
+error_spread_5 <- y - test_data_merge_no_na_5$Pred1
+
+error_limited_spread_5 <- y - test_data_merge_no_na_5$PredLimited1
+
+error_ensemble_pred_best_mape_5 <- y - test_data_merge_no_na_5$Ensemble_Best_MAPE
+error_ensemble_pred_best_rmse_5 <- y - test_data_merge_no_na_5$Ensemble_Best_RMSE
+
+test_df_5 <- data.frame('FirstError'=character(), 'SecondError'=character(), 'p.value'=numeric(), 'p.value.less'=numeric(), 'p.value.greater'=numeric(), 'statistic'=numeric())
+names <- c("NoChange", "Var_Comb", "Var_Dict", "Var_No", "Var_Vader", "Var_Watson", "NN_Comb", "NN_Dict", "NN_No", "NN_Vader", "NN_Watson", "NN_Comb_Rel", "NN_Dict_Rel", "NN_No_Rel", "NN_Vader_Rel", "NN_Watson_Rel", "LimitedSpread", "LimitedTrainingSpread", "Ensemble_Best_RMSE", "Ensemble_Best_MAPE")
+
+result_5 <- pairwise_combinations(list((error_nochange_5), (error_var_all_5), (error_var_dict_5), (error_var_no_5), (error_var_vader_5), (error_var_watson_5), (error_nn_all_5), (error_nn_dict_5), (error_nn_no_5), (error_nn_vader_5), (error_nn_watson_5), (error_nn_all_rel_5), (error_nn_dict_rel_5), (error_nn_no_rel_5), (error_nn_vader_rel_5), (error_nn_watson_rel_5), (error_spread_5), (error_limited_spread_5), (error_ensemble_pred_best_rmse_5), (error_ensemble_pred_best_mape_5)), test_df_5, names)
+
+
+
+```
+
+
+## New: Adding directional statistic
+This will add the percentage of times the predictions are correct in predicting a price increase or decrease, i.e., the percentage of times they predict the right direction of change.
+
+```{r directionalstatistic}
+
+predictions_df <- predictions_df %>% 
+  mutate("y_lag" = lag(y_True) - y_True,
+         "NoChange_direction" = ifelse((lag(NoChange) - NoChange)*y_lag >= 0, 1, 0),
+         "Var_Comb_direction" = ifelse((lag(Var_Comb) - Var_Comb)*y_lag >= 0, 1, 0),
+         "Var_Dict_direction" = ifelse((lag(Var_Dict) - Var_Dict)*y_lag >= 0, 1, 0),
+         "Var_Vader_direction" = ifelse((lag(Var_Vader) - Var_Vader)*y_lag >= 0, 1, 0),
+         "Var_Watson_direction" = ifelse((lag(Var_Watson) - Var_Watson)*y_lag >= 0, 1, 0),
+         "Var_No_direction" = ifelse((lag(Var_No) - Var_No)*y_lag >= 0, 1, 0),
+         "NN_Comb_direction" = ifelse((lag(NN_Comb) - NN_Comb)*y_lag >= 0, 1, 0),
+         "NN_Watson_direction" = ifelse((lag(NN_Watson) - NN_Watson)*y_lag >= 0, 1, 0),
+         "NN_Dict_direction" = ifelse((lag(NN_Dict) - NN_Dict)*y_lag >= 0, 1, 0),
+         "NN_Vader_direction" = ifelse((lag(NN_Vader) - NN_Vader)*y_lag >= 0, 1, 0),
+         "NN_No_direction" = ifelse((lag(NN_No) - NN_No)*y_lag >= 0, 1, 0),
+         "NN_Comb_Rel_direction" = ifelse((lag(NN_Comb_Rel) - NN_Comb_Rel)*y_lag >= 0, 1, 0),
+         "NN_Watson_Rel_direction" = ifelse((lag(NN_Watson_Rel) - NN_Watson_Rel)*y_lag >= 0, 1, 0),
+         "NN_Dict_Rel_direction" = ifelse((lag(NN_Dict_Rel) - NN_Dict_Rel)*y_lag >= 0, 1, 0),
+         "NN_Vader_Rel_direction" = ifelse((lag(NN_Vader_Rel) - NN_Vader_Rel)*y_lag >= 0, 1, 0),
+         "NN_No_Rel_direction" = ifelse((lag(NN_No_Rel) - NN_No_Rel)*y_lag >= 0, 1, 0),
+         "Ensemble_Best_RMSE_direction" = ifelse((lag(Ensemble_Best_RMSE) - Ensemble_Best_RMSE)*y_lag >= 0, 1, 0),
+         "Ensemble_Best_MAPE_direction" = ifelse((lag(Ensemble_Best_MAPE) - Ensemble_Best_MAPE)*y_lag >= 0, 1, 0)) 
+
+pred_directional <- predictions_df %>% 
+  dplyr::select(c(NoChange_direction:Ensemble_Best_MAPE_direction)) %>% 
+  pivot_longer(cols = NoChange_direction:Ensemble_Best_MAPE_direction,
+               names_to = "Model",
+               values_to = "Direction") %>% 
+  filter(!is.na(Direction)) %>% 
+  group_by(Model) %>% 
+  summarize("DirectionalStatistic" = sum(Direction)/100)
+
+
+predictions_df_3 <- predictions_df_3 %>% 
+  mutate("y_lag" = lag(y_True) - y_True,
+         "NoChange_direction" = ifelse((lag(NoChange) - NoChange)*y_lag >= 0, 1, 0),
+         "Var_Comb_direction" = ifelse((lag(Var_Comb) - Var_Comb)*y_lag >= 0, 1, 0),
+         "Var_Dict_direction" = ifelse((lag(Var_Dict) - Var_Dict)*y_lag >= 0, 1, 0),
+         "Var_Vader_direction" = ifelse((lag(Var_Vader) - Var_Vader)*y_lag >= 0, 1, 0),
+         "Var_Watson_direction" = ifelse((lag(Var_Watson) - Var_Watson)*y_lag >= 0, 1, 0),
+         "Var_No_direction" = ifelse((lag(Var_No) - Var_No)*y_lag >= 0, 1, 0),
+         "NN_Comb_direction" = ifelse((lag(NN_Comb) - NN_Comb)*y_lag >= 0, 1, 0),
+         "NN_Watson_direction" = ifelse((lag(NN_Watson) - NN_Watson)*y_lag >= 0, 1, 0),
+         "NN_Dict_direction" = ifelse((lag(NN_Dict) - NN_Dict)*y_lag >= 0, 1, 0),
+         "NN_Vader_direction" = ifelse((lag(NN_Vader) - NN_Vader)*y_lag >= 0, 1, 0),
+         "NN_No_direction" = ifelse((lag(NN_No) - NN_No)*y_lag >= 0, 1, 0),
+         "NN_Comb_Rel_direction" = ifelse((lag(NN_Comb_Rel) - NN_Comb_Rel)*y_lag >= 0, 1, 0),
+         "NN_Watson_Rel_direction" = ifelse((lag(NN_Watson_Rel) - NN_Watson_Rel)*y_lag >= 0, 1, 0),
+         "NN_Dict_Rel_direction" = ifelse((lag(NN_Dict_Rel) - NN_Dict_Rel)*y_lag >= 0, 1, 0),
+         "NN_Vader_Rel_direction" = ifelse((lag(NN_Vader_Rel) - NN_Vader_Rel)*y_lag >= 0, 1, 0),
+         "NN_No_Rel_direction" = ifelse((lag(NN_No_Rel) - NN_No_Rel)*y_lag >= 0, 1, 0),
+         "Ensemble_Best_RMSE_direction" = ifelse((lag(Ensemble_Best_RMSE) - Ensemble_Best_RMSE)*y_lag >= 0, 1, 0),
+         "Ensemble_Best_MAPE_direction" = ifelse((lag(Ensemble_Best_MAPE) - Ensemble_Best_MAPE)*y_lag >= 0, 1, 0)) 
+
+pred_directional_3 <- predictions_df_3 %>% 
+  dplyr::select(c(NoChange_direction:Ensemble_Best_MAPE_direction)) %>% 
+  pivot_longer(cols = NoChange_direction:Ensemble_Best_MAPE_direction,
+               names_to = "Model",
+               values_to = "Direction") %>% 
+  filter(!is.na(Direction)) %>% 
+  group_by(Model) %>% 
+  summarize("DirectionalStatistic" = sum(Direction)/100)
+
+
+predictions_df_5 <- predictions_df_5 %>% 
+  mutate("y_lag" = lag(y_True) - y_True,
+         "NoChange_direction" = ifelse((lag(NoChange) - NoChange)*y_lag >= 0, 1, 0),
+         "Var_Comb_direction" = ifelse((lag(Var_Comb) - Var_Comb)*y_lag >= 0, 1, 0),
+         "Var_Dict_direction" = ifelse((lag(Var_Dict) - Var_Dict)*y_lag >= 0, 1, 0),
+         "Var_Vader_direction" = ifelse((lag(Var_Vader) - Var_Vader)*y_lag >= 0, 1, 0),
+         "Var_Watson_direction" = ifelse((lag(Var_Watson) - Var_Watson)*y_lag >= 0, 1, 0),
+         "Var_No_direction" = ifelse((lag(Var_No) - Var_No)*y_lag >= 0, 1, 0),
+         "NN_Comb_direction" = ifelse((lag(NN_Comb) - NN_Comb)*y_lag >= 0, 1, 0),
+         "NN_Watson_direction" = ifelse((lag(NN_Watson) - NN_Watson)*y_lag >= 0, 1, 0),
+         "NN_Dict_direction" = ifelse((lag(NN_Dict) - NN_Dict)*y_lag >= 0, 1, 0),
+         "NN_Vader_direction" = ifelse((lag(NN_Vader) - NN_Vader)*y_lag >= 0, 1, 0),
+         "NN_No_direction" = ifelse((lag(NN_No) - NN_No)*y_lag >= 0, 1, 0),
+         "NN_Comb_Rel_direction" = ifelse((lag(NN_Comb_Rel) - NN_Comb_Rel)*y_lag >= 0, 1, 0),
+         "NN_Watson_Rel_direction" = ifelse((lag(NN_Watson_Rel) - NN_Watson_Rel)*y_lag >= 0, 1, 0),
+         "NN_Dict_Rel_direction" = ifelse((lag(NN_Dict_Rel) - NN_Dict_Rel)*y_lag >= 0, 1, 0),
+         "NN_Vader_Rel_direction" = ifelse((lag(NN_Vader_Rel) - NN_Vader_Rel)*y_lag >= 0, 1, 0),
+         "NN_No_Rel_direction" = ifelse((lag(NN_No_Rel) - NN_No_Rel)*y_lag >= 0, 1, 0),
+         "Ensemble_Best_RMSE_direction" = ifelse((lag(Ensemble_Best_RMSE) - Ensemble_Best_RMSE)*y_lag >= 0, 1, 0),
+         "Ensemble_Best_MAPE_direction" = ifelse((lag(Ensemble_Best_MAPE) - Ensemble_Best_MAPE)*y_lag >= 0, 1, 0)) 
+
+pred_directional_5 <- predictions_df_5 %>% 
+  dplyr::select(c(NoChange_direction:Ensemble_Best_MAPE_direction)) %>% 
+  pivot_longer(cols = NoChange_direction:Ensemble_Best_MAPE_direction,
+               names_to = "Model",
+               values_to = "Direction") %>% 
+  filter(!is.na(Direction)) %>% 
+  group_by(Model) %>% 
+  summarize("DirectionalStatistic" = sum(Direction)/100)
+
+# finally, adding the spread and limited spread models
+predictions_df_temp <- predictions_df %>% 
+  dplyr::select(y_True, Pred1, PredLimited1) %>% 
+  na.omit() %>% 
+  mutate("y_lag" = lag(y_True) - y_True,
+         "Spread_direction" = ifelse((lag(Pred1) - Pred1)*y_lag >= 0, 1, 0),
+         "Spread_limited_direction" = ifelse((lag(PredLimited1) - PredLimited1)*y_lag >= 0, 1, 0)) %>% 
+  pivot_longer(cols = Spread_direction:Spread_limited_direction,
+               names_to = "Model",
+               values_to = "Direction") %>% 
+  filter(!is.na(Direction)) %>% 
+  group_by(Model) %>% 
+  summarize("DirectionalStatistic" = sum(Direction)/100)
+
+predictions_df_temp_3 <- predictions_df_3 %>% 
+  dplyr::select(y_True, Pred3, PredLimited3) %>% 
+  na.omit() %>% 
+  mutate("y_lag" = lag(y_True) - y_True,
+         "Spread_direction" = ifelse((lag(Pred3) - Pred3)*y_lag >= 0, 1, 0),
+         "Spread_limited_direction" = ifelse((lag(PredLimited3) - PredLimited3)*y_lag >= 0, 1, 0)) %>% 
+  pivot_longer(cols = Spread_direction:Spread_limited_direction,
+               names_to = "Model",
+               values_to = "Direction") %>% 
+  filter(!is.na(Direction)) %>% 
+  group_by(Model) %>% 
+  summarize("DirectionalStatistic" = sum(Direction)/100)
+
+predictions_df_temp_5 <- predictions_df_5 %>% 
+  dplyr::select(y_True, Pred5, PredLimited5) %>% 
+  na.omit() %>% 
+  mutate("y_lag" = lag(y_True) - y_True,
+         "Spread_direction" = ifelse((lag(Pred5) - Pred5)*y_lag >= 0, 1, 0),
+         "Spread_limited_direction" = ifelse((lag(PredLimited5) - PredLimited5)*y_lag >= 0, 1, 0)) %>% 
+  pivot_longer(cols = Spread_direction:Spread_limited_direction,
+               names_to = "Model",
+               values_to = "Direction") %>% 
+  filter(!is.na(Direction)) %>% 
+  group_by(Model) %>% 
+  summarize("DirectionalStatistic" = sum(Direction)/100)
+
+# add them back together
+
+pred_directional <- rbind(pred_directional, 
+                          predictions_df_temp) %>% 
+  mutate(across(Model, ~gsub("_direction", "", .)))
+pred_directional_3 <- rbind(pred_directional_3, 
+                          predictions_df_temp_3)%>% 
+  mutate(across(Model, ~gsub("_direction", "", .)))
+pred_directional_5 <- rbind(pred_directional_5, 
+                          predictions_df_temp_5)%>% 
+  mutate(across(Model, ~gsub("_direction", "", .)))
+
+```
+
+
+## Calculate how many times a forecast was statistically better than another
+
+```{r}
+
+# we need to take the directionality into account here due to the way we calculated the DM Test earlier. Here, an approach can be better by being method 1 and more accurate than a second method 2, or b) being method 2 and being more accurate than a method 1 in the comparison 
+result_is_better <- result %>% 
+  group_by(FirstError) %>% 
+  summarize('CountBetter1' = length(FirstError[p.value.less <= 0.05])) %>% 
+  rename(Approach=FirstError) %>% 
+  replace(is.na(.), 0) %>% 
+  full_join(result %>% 
+    group_by(SecondError) %>% 
+    summarize('CountBetter2' = length(SecondError[p.value.greater <= 0.05])) %>% 
+    rename(Approach=SecondError) %>%  
+    replace(is.na(.), 0)) %>% 
+    replace(is.na(.), 0)%>% 
+    mutate(CountBetter = CountBetter1+CountBetter2) 
+
+result_is_better_3 <- result_3 %>% 
+  group_by(FirstError) %>% 
+  summarize('CountBetter1' = length(FirstError[p.value.less <= 0.05])) %>% 
+  rename(Approach=FirstError) %>% 
+  replace(is.na(.), 0) %>% 
+  full_join(result_3 %>% 
+    group_by(SecondError) %>% 
+    summarize('CountBetter2' = length(SecondError[p.value.greater <= 0.05])) %>% 
+    rename(Approach=SecondError) %>% 
+    replace(is.na(.), 0)) %>% 
+  replace(is.na(.), 0)%>% 
+  mutate(CountBetter = CountBetter1+CountBetter2)
+
+result_is_better_5 <- result_5 %>% 
+  group_by(FirstError) %>% 
+  summarize('CountBetter1' = length(FirstError[p.value.less <= 0.05])) %>% 
+  rename(Approach=FirstError) %>% 
+  replace(is.na(.), 0) %>% 
+  full_join(result_5 %>% 
+    group_by(SecondError) %>% 
+    summarize('CountBetter2' = length(SecondError[p.value.greater <= 0.05])) %>% 
+    rename(Approach=SecondError) %>% 
+    replace(is.na(.), 0)) %>% 
+  replace(is.na(.), 0) %>% 
+  mutate(CountBetter = CountBetter1+CountBetter2)
+
+```
+
+
+## Calculate Simulation
+
+Use the previous predictions to calculate the profit and ROI for the simulation.
+
+```{r simulations}
+
+rounds = 1000
+
+results_df$sum_profit = 0
+results_df$sum_max_value = 0
+results_df$sum_trades_buy = 0
+results_df$sum_trades_sell = 0
+
+results_df_ind_trades <- data.frame("Approach" = character(),"Round" = integer(), "TradesBuy"=numeric(), "TradesSell"=numeric())
+
+for(j in 1: nrow(results_df)){
+  sum_profit = 0
+  sum_max_value = 0
+  sum_trades_buy = 0
+  sum_trades_sell = 0
+
+  model <- results_df$Model[j]
+  local_predictions = predictions_df[,model]
+  
+  for(i in 1:rounds){
+    max_value = 0
+    barrels = 0
+    value = 0
+    profit = 0
+    trades_buy = 0
+    trades_sell = 0
+    
+    for(index in 1:(length(test_data$WTI)-1)){
+      current_price = test_data$WTI[index]
+      
+      # if it's the no change forecast, we make a random decision
+      if(model == 'NoChange'){
+        if(round(runif(1)) == 1){
+          barrels = barrels + 1
+          value = value + current_price
+          if(value > max_value){
+            max_value = value
+          }
+          trades_buy = trades_buy + 1
+        }else{
+          if (barrels > 0){
+            profit = profit + barrels * current_price - value
+            barrels = 0
+            value = 0
+            trades_sell = trades_sell + 1
+          }
+        }
+      }
+      else{
+        if(local_predictions[(index+1)] > current_price ){
+          barrels = barrels + 1
+          value = value + current_price
+          if(value > max_value){
+            max_value = value
+          }
+          trades_buy = trades_buy + 1
+        }else{
+          if (barrels > 0){
+            profit = profit + barrels * current_price - value
+            barrels = 0
+            value = 0
+            trades_sell = trades_sell + 1
+          }
+        }
+      }
+    }
+    
+    sum_profit = sum_profit + profit
+    sum_max_value = sum_max_value + max_value
+    sum_trades_buy = sum_trades_buy + trades_buy
+    sum_trades_sell = sum_trades_sell + trades_sell
+    
+    results_df_ind_trades[nrow(results_df_ind_trades)+1,c('Approach','Round','TradesBuy','TradesSell')] <- c(model,i,trades_buy, trades_sell)
+  }
+  results_df[j,c('sum_profit')] <- sum_profit/rounds
+  results_df[j,c('sum_max_value')] <- sum_max_value/rounds
+  results_df[j,c('sum_trades_buy')] <- sum_trades_buy/rounds
+  results_df[j,c('sum_trades_sell')] <- sum_trades_sell/rounds
+}
+
+# finally, add the results for the limited spread
+sum_profit = 0
+sum_max_value = 0
+local_predictions = test_data_merge_no_na$Pred1
+sum_trades_buy = 0
+sum_trades_sell = 0
+
+for(i in 1:rounds){
+  max_value = 0
+  barrels = 0
+  value = 0
+  profit = 0
+  trades_buy = 0
+  trades_sell = 0
+    
+  for(index in 1:(length(local_predictions)-1)){
+    current_price = test_data_merge_no_na$y_true[index]
+    if(local_predictions[(index+1)] > current_price ){
+      barrels = barrels + 1
+      value = value + current_price
+      if(value > max_value){
+        max_value = value
+      }
+      trades_buy = trades_buy + 1
+    }else{
+      if (barrels > 0){
+        profit = profit + barrels * current_price - value
+        barrels = 0
+        value = 0
+        trades_sell = trades_sell + 1
+      }
+    }
+  }
+  
+  sum_profit = sum_profit + profit
+  sum_max_value = sum_max_value + max_value
+  sum_trades_buy = sum_trades_buy + trades_buy
+  sum_trades_sell = sum_trades_sell + trades_sell
+  
+}
+results_df[nrow(results_df)+1,] <- c('LimitedSpread',rmse_limited_spread, mape_spread, NULL, sum_profit/rounds, sum_max_value/rounds, sum_trades_buy/rounds, sum_trades_sell/rounds)
+
+
+sum_profit = 0
+sum_max_value = 0
+local_predictions = test_data_merge_no_na$PredLimited1
+sum_trades_buy = 0
+sum_trades_sell = 0
+  
+
+for(i in 1:rounds){
+  max_value = 0
+  barrels = 0
+  value = 0
+  profit = 0
+  trades_buy = 0
+  trades_sell = 0
+  
+  for(index in 1:(length(local_predictions)-1)){
+    current_price = test_data_merge_no_na$y_true[index]
+    if(local_predictions[(index+1)] > current_price ){
+      barrels = barrels + 1
+      value = value + current_price
+      if(value > max_value){
+        max_value = value
+      }
+      trades_buy = trades_buy + 1
+    }else{
+      if (barrels > 0){
+        profit = profit + barrels * current_price - value
+        barrels = 0
+        value = 0
+        trades_sell = trades_sell + 1
+      }
+    }
+  }
+  
+  sum_profit = sum_profit + profit
+  sum_max_value = sum_max_value + max_value
+  sum_trades_buy = sum_trades_buy + trades_buy
+  sum_trades_sell = sum_trades_sell + trades_sell
+  
+}
+
+results_df[nrow(results_df)+1,] <- c('LimitedTrainingSpread',rmse_limited_training_spread, mape_limited_spread, NULL, sum_profit/rounds, sum_max_value/rounds, sum_trades_buy/rounds, sum_trades_sell/rounds)
+
+# for the limited training data spread, it's different:
+
+summary(preds_limited_training_spread[2:length(preds_limited_training_spread)] - (limited_test_data$real_wti*limited_test_data$inflation_2015/100)[1:(nrow(limited_test_data)-1)])
+```
+
+Repeat for 3 and 5 periods
+
+```{r}
+
+rounds = 1000
+
+results_df_3$sum_profit = 0
+results_df_3$sum_max_value = 0
+results_df_3$sum_trades_buy = 0
+results_df_3$sum_trades_sell = 0
+
+for(j in 1: nrow(results_df_3)){
+  sum_profit = 0
+  sum_max_value = 0
+  sum_trades_buy = 0
+  sum_trades_sell = 0
+
+  model <- results_df_3$Model[j]
+  local_predictions = predictions_df_3[,model]
+  for(i in 1:rounds){
+    max_value = 0
+    barrels = 0
+    value = 0
+    profit = 0
+    trades_buy = 0
+    trades_sell = 0
+    
+    for(index in 1:(length(test_data$WTI)-3)){
+      current_price = test_data$WTI[index]
+      
+      # if it's the no change forecast, we make a random decision
+      if(model == 'NoChange'){
+        if(round(runif(1)) == 1){
+          barrels = barrels + 1
+          value = value + current_price
+          if(value > max_value){
+            max_value = value
+          }
+          trades_buy = trades_buy + 1
+        }else{
+          if (barrels > 0){
+            profit = profit + barrels * current_price - value
+            barrels = 0
+            value = 0
+            trades_sell = trades_sell + 1
+          }
+        }
+      }
+      else{
+        if(local_predictions[(index+1)] > current_price ){
+          barrels = barrels + 1
+          value = value + current_price
+          if(value > max_value){
+            max_value = value
+          }
+          trades_buy = trades_buy + 1
+        }else{
+          if (barrels > 0){
+            profit = profit + barrels * current_price - value
+            barrels = 0
+            value = 0
+            trades_sell = trades_sell + 1
+          }
+        }
+      }
+    }
+    
+    sum_profit = sum_profit + profit
+    sum_max_value = sum_max_value + max_value
+    sum_trades_buy = sum_trades_buy + trades_buy
+    sum_trades_sell = sum_trades_sell + trades_sell
+  }
+  results_df_3[j,c('sum_profit')] <- sum_profit/rounds
+  results_df_3[j,c('sum_max_value')] <- sum_max_value/rounds
+  results_df_3[j,c('sum_trades_buy')] <- sum_trades_buy/rounds
+  results_df_3[j,c('sum_trades_sell')] <- sum_trades_sell/rounds
+  
+}
+
+# finally, add the results for the limited spread
+sum_profit = 0
+sum_max_value = 0
+local_predictions = test_data_merge_no_na_3$Pred3
+sum_trades_buy = 0
+sum_trades_sell = 0
+
+for(i in 1:rounds){
+  max_value = 0
+  barrels = 0
+  value = 0
+  profit = 0
+  trades_buy = 0
+  trades_sell = 0
+    
+  for(index in 1:(length(local_predictions)-1)){
+    current_price = test_data_merge_no_na_3$y_true[index]
+    if(local_predictions[(index+1)] > current_price ){
+      barrels = barrels + 1
+      value = value + current_price
+      if(value > max_value){
+        max_value = value
+      }
+      trades_buy = trades_buy + 1
+    }else{
+      if (barrels > 0){
+        profit = profit + barrels * current_price - value
+        barrels = 0
+        value = 0
+        trades_sell = trades_sell + 1
+      }
+    }
+  }
+  
+  sum_profit = sum_profit + profit
+  sum_max_value = sum_max_value + max_value
+  sum_trades_buy = sum_trades_buy + trades_buy
+  sum_trades_sell = sum_trades_sell + trades_sell
+  
+}
+results_df_3[nrow(results_df_3)+1,] <- c('LimitedSpread',rmse_limited_spread_3, mape_spread_3, NULL, sum_profit/rounds, sum_max_value/rounds, sum_trades_buy/rounds, sum_trades_sell/rounds)
+
+
+sum_profit = 0
+sum_max_value = 0
+local_predictions = test_data_merge_no_na_3$PredLimited3
+sum_trades_buy = 0
+sum_trades_sell = 0
+  
+
+for(i in 1:rounds){
+  max_value = 0
+  barrels = 0
+  value = 0
+  profit = 0
+  trades_buy = 0
+  trades_sell = 0
+  
+  for(index in 1:(length(local_predictions)-1)){
+    current_price = test_data_merge_no_na_3$y_true[index]
+    if(local_predictions[(index+1)] > current_price ){
+      barrels = barrels + 1
+      value = value + current_price
+      if(value > max_value){
+        max_value = value
+      }
+      trades_buy = trades_buy + 1
+    }else{
+      if (barrels > 0){
+        profit = profit + barrels * current_price - value
+        barrels = 0
+        value = 0
+        trades_sell = trades_sell + 1
+      }
+    }
+  }
+  
+  sum_profit = sum_profit + profit
+  sum_max_value = sum_max_value + max_value
+  sum_trades_buy = sum_trades_buy + trades_buy
+  sum_trades_sell = sum_trades_sell + trades_sell
+  
+}
+
+results_df_3[nrow(results_df_3)+1,] <- c('LimitedTrainingSpread',rmse_limited_training_spread_3, mape_limited_spread_3, NULL, sum_profit/rounds, sum_max_value/rounds, sum_trades_buy/rounds, sum_trades_sell/rounds)
+
+# 5 periods
+rounds = 1000
+
+results_df_5$sum_profit = 0
+results_df_5$sum_max_value = 0
+results_df_5$sum_trades_buy = 0
+results_df_5$sum_trades_sell = 0
+
+for(j in 1: nrow(results_df_5)){
+  sum_profit = 0
+  sum_max_value = 0
+  sum_trades_buy = 0
+  sum_trades_sell = 0
+
+  model <- results_df_5$Model[j]
+  local_predictions = predictions_df_5[,model]
+  for(i in 1:rounds){
+    max_value = 0
+    barrels = 0
+    value = 0
+    profit = 0
+    trades_buy = 0
+    trades_sell = 0
+    
+    for(index in 1:(length(test_data$WTI)-5)){
+      current_price = test_data$WTI[index]
+      
+      # if it's the no change forecast, we make a random decision
+      if(model == 'NoChange'){
+        if(round(runif(1)) == 1){
+          barrels = barrels + 1
+          value = value + current_price
+          if(value > max_value){
+            max_value = value
+          }
+          trades_buy = trades_buy + 1
+        }else{
+          if (barrels > 0){
+            profit = profit + barrels * current_price - value
+            barrels = 0
+            value = 0
+            trades_sell = trades_sell + 1
+          }
+        }
+      }
+      else{
+        if(local_predictions[(index+1)] > current_price ){
+          barrels = barrels + 1
+          value = value + current_price
+          if(value > max_value){
+            max_value = value
+          }
+          trades_buy = trades_buy + 1
+        }else{
+          if (barrels > 0){
+            profit = profit + barrels * current_price - value
+            barrels = 0
+            value = 0
+            trades_sell = trades_sell + 1
+          }
+        }
+      }
+    }
+    
+    sum_profit = sum_profit + profit
+    sum_max_value = sum_max_value + max_value
+    sum_trades_buy = sum_trades_buy + trades_buy
+    sum_trades_sell = sum_trades_sell + trades_sell
+  }
+  results_df_5[j,c('sum_profit')] <- sum_profit/rounds
+  results_df_5[j,c('sum_max_value')] <- sum_max_value/rounds
+  results_df_5[j,c('sum_trades_buy')] <- sum_trades_buy/rounds
+  results_df_5[j,c('sum_trades_sell')] <- sum_trades_sell/rounds
+  
+}
+
+# finally, add the results for the limited spread
+sum_profit = 0
+sum_max_value = 0
+local_predictions = test_data_merge_no_na_5$Pred5
+sum_trades_buy = 0
+sum_trades_sell = 0
+
+for(i in 1:rounds){
+  max_value = 0
+  barrels = 0
+  value = 0
+  profit = 0
+  trades_buy = 0
+  trades_sell = 0
+    
+  for(index in 1:(length(local_predictions)-1)){
+    current_price = test_data_merge_no_na_5$y_true[index]
+    if(local_predictions[(index+1)] > current_price ){
+      barrels = barrels + 1
+      value = value + current_price
+      if(value > max_value){
+        max_value = value
+      }
+      trades_buy = trades_buy + 1
+    }else{
+      if (barrels > 0){
+        profit = profit + barrels * current_price - value
+        barrels = 0
+        value = 0
+        trades_sell = trades_sell + 1
+      }
+    }
+  }
+  
+  sum_profit = sum_profit + profit
+  sum_max_value = sum_max_value + max_value
+  sum_trades_buy = sum_trades_buy + trades_buy
+  sum_trades_sell = sum_trades_sell + trades_sell
+  
+}
+results_df_5[nrow(results_df_5)+1,] <- c('LimitedSpread',rmse_limited_spread_5, mape_spread_5, NULL, sum_profit/rounds, sum_max_value/rounds, sum_trades_buy/rounds, sum_trades_sell/rounds)
+
+
+sum_profit = 0
+sum_max_value = 0
+local_predictions = test_data_merge_no_na_5$PredLimited5
+sum_trades_buy = 0
+sum_trades_sell = 0
+  
+
+for(i in 1:rounds){
+  max_value = 0
+  barrels = 0
+  value = 0
+  profit = 0
+  trades_buy = 0
+  trades_sell = 0
+  
+  for(index in 1:(length(local_predictions)-1)){
+    current_price = test_data_merge_no_na_5$y_true[index]
+    if(local_predictions[(index+1)] > current_price ){
+      barrels = barrels + 1
+      value = value + current_price
+      if(value > max_value){
+        max_value = value
+      }
+      trades_buy = trades_buy + 1
+    }else{
+      if (barrels > 0){
+        profit = profit + barrels * current_price - value
+        barrels = 0
+        value = 0
+        trades_sell = trades_sell + 1
+      }
+    }
+  }
+  
+  sum_profit = sum_profit + profit
+  sum_max_value = sum_max_value + max_value
+  sum_trades_buy = sum_trades_buy + trades_buy
+  sum_trades_sell = sum_trades_sell + trades_sell
+  
+}
+
+results_df_5[nrow(results_df_5)+1,] <- c('LimitedTrainingSpread',rmse_limited_training_spread_5, mape_limited_spread_5, NULL, sum_profit/rounds, sum_max_value/rounds, sum_trades_buy/rounds, sum_trades_sell/rounds)
+
+```
+
+
+## ROI Calculation
+
+Finally, calculate the ROI defines as profit per invested amount.
+
+```{r roi}
+
+results_df$ROI <- as.numeric(results_df$sum_profit) / as.numeric(results_df$sum_max_value)
+
+results_df_3$ROI <- as.numeric(results_df_3$sum_profit) / as.numeric(results_df_3$sum_max_value)
+
+results_df_5$ROI <- as.numeric(results_df_5$sum_profit) / as.numeric(results_df_5$sum_max_value)
+```
+
+## Ranking of methods
+
+Here, we can rank the different methods by RMSE, MAPE, and ROI and compare them based on average rank
+
+```{r ranking}
+
+results_df <- results_df %>% mutate_at(c("RMSE","MAPE","sum_profit","sum_max_value"), as.numeric)
+
+results_df$RMSE_Rank <- rank(results_df$RMSE)
+# ROI: larger is better
+results_df$ROI_Rank <- rank(desc(results_df$ROI))
+results_df$MAPE_Rank <- rank(results_df$MAPE)
+
+# calculate the average rank between performance and ROI
+results_df$Performance_Rank <- (results_df$RMSE_Rank + results_df$MAPE_Rank)/2
+
+results_df$Overall_Rank <- (results_df$Performance_Rank + results_df$ROI_Rank) / 2
+
+cor(results_df$ROI_Rank, results_df$Performance_Rank, method='spearman')
+
+# repeat for 3 and 5 periods
+
+results_df_3 <- results_df_3 %>% mutate_at(c("RMSE","MAPE","sum_profit","sum_max_value"), as.numeric)
+
+results_df_3$RMSE_Rank <- rank(results_df_3$RMSE)
+# ROI: larger is better
+results_df_3$ROI_Rank <- rank(desc(results_df_3$ROI))
+results_df_3$MAPE_Rank <- rank(results_df_3$MAPE)
+
+# calculate the average rank between performance and ROI
+results_df_3$Performance_Rank <- (results_df_3$RMSE_Rank + results_df_3$MAPE_Rank)/2
+
+results_df_3$Overall_Rank <- (results_df_3$Performance_Rank + results_df_3$ROI_Rank) / 2
+
+cor(results_df_3$ROI_Rank, results_df_3$Performance_Rank, method='spearman')
+
+
+# 5 periods
+results_df_5 <- results_df_5 %>% mutate_at(c("RMSE","MAPE","sum_profit","sum_max_value"), as.numeric)
+
+results_df_5$RMSE_Rank <- rank(results_df_5$RMSE)
+# ROI: larger is better
+results_df_5$ROI_Rank <- rank(desc(results_df_5$ROI))
+results_df_5$MAPE_Rank <- rank(results_df_5$MAPE)
+
+# calculate the average rank between performance and ROI
+results_df_5$Performance_Rank <- (results_df_5$RMSE_Rank + results_df_5$MAPE_Rank)/2
+
+results_df_5$Overall_Rank <- (results_df_5$Performance_Rank + results_df_5$ROI_Rank) / 2
+
+cor(results_df_5$ROI_Rank, results_df_5$Performance_Rank, method='spearman')
+
+
+```
+
+## Graphical comparison of forecasts
+
+Here, we re-create the picture comparing the training and test error forecast for the different methods
+
+```{r ggplot}
+
+test_data$Date <- as.Date(test_data$Date)
+
+predictions_df$Date <- test_data$Date
+
+limited_test_data$Date <- as.Date(limited_test_data$Date)
+
+test_data_spread_limited$Date <- as.Date(test_data_spread_limited$Date)
+
+limited_test_data$"LimitedTrainingSpread" <- preds_limited_training_spread
+
+limited_test_data$"LimitedSpread" <- preds_limited_spread
+
+# merge the test datasets
+merged_test_data <- merge(predictions_df, limited_test_data[,c("Date","LimitedTrainingSpread","LimitedSpread")], by=c("Date"),all=TRUE)
+
+merged_df_long <- merged_test_data %>% 
+  dplyr::select(c(1:17,21:22,42:43)) %>% 
+  pivot_longer(cols=!c("Date"), names_to = c("Method"), values_to = c("Forecast"))
+
+best_2 <- results_df %>% 
+  mutate(Model = dplyr::recode(Model, 
+                                                             NoChange = "No-Change",
+                                                             Var_Comb = "VAR Combined Sentiment",
+                                                             Var_Vader = "VAR Vader",
+                                                             Var_Watson = "VAR Watson",
+                                                             Var_Dict = "VAR Dictionary",
+                                                             Var_No = "VAR No Sentiment",
+                                                             NN_Comb = "NN Combined Sentiment",
+                                                             NN_Vader = "NN Vader",
+                                                             NN_Watson = "NN Watson",
+                                                             NN_Dict = "NN Dictionary",
+                                                             NN_No = "NN No Sentiment",
+                                                             NN_Comb_Rel = "NN Relative Combined Sentiment",
+                                                             NN_Vader_Rel = "NN Relative Vader",
+                                                             NN_Watson_Rel = "NN Relative Watson",
+                                                             NN_Dict_Rel = "NN Relative Dictionary",
+                                                             NN_No_Rel = "NN Relative No Sentiment",
+                                                             Ensemble_Best_RMSE = "Ensemble Best RMSE",
+                                                             Ensemble_Best_MAPE = "Ensemble Best MAPE", 
+                                                             LimitedSpread = "Spread",
+                                                             LimitedTrainingSpread = "LimitedSpread"
+                                                             )) %>% 
+  slice_min(RMSE, n=2) %>% 
+  dplyr::select(Model) %>% pull()
+
+worst_2 <- results_df %>% 
+  mutate(Model = dplyr::recode(Model, 
+                                                             NoChange = "No-Change",
+                                                             Var_Comb = "VAR Combined Sentiment",
+                                                             Var_Vader = "VAR Vader",
+                                                             Var_Watson = "VAR Watson",
+                                                             Var_Dict = "VAR Dictionary",
+                                                             Var_No = "VAR No Sentiment",
+                                                             NN_Comb = "NN Combined Sentiment",
+                                                             NN_Vader = "NN Vader",
+                                                             NN_Watson = "NN Watson",
+                                                             NN_Dict = "NN Dictionary",
+                                                             NN_No = "NN No Sentiment",
+                                                             NN_Comb_Rel = "NN Relative Combined Sentiment",
+                                                             NN_Vader_Rel = "NN Relative Vader",
+                                                             NN_Watson_Rel = "NN Relative Watson",
+                                                             NN_Dict_Rel = "NN Relative Dictionary",
+                                                             NN_No_Rel = "NN Relative No Sentiment",
+                                                             Ensemble_Best_RMSE = "Ensemble Best RMSE",
+                                                             Ensemble_Best_MAPE = "Ensemble Best MAPE", 
+                                                             LimitedSpread = "Spread",
+                                                             LimitedTrainingSpread = "LimitedSpread"
+                                                             )) %>% 
+  slice_max(RMSE, n=2) %>% 
+  dplyr::select(Model) %>% pull()
+
+best_worst_nochange <- c(best_2, "No-Change", worst_2) 
+  
+
+merged_df_long <- merged_df_long %>% mutate(Method = dplyr::recode(Method, 
+                                                             NoChange = "No-Change",
+                                                             Var_Comb = "VAR Combined Sentiment",
+                                                             Var_Vader = "VAR Vader",
+                                                             Var_Watson = "VAR Watson",
+                                                             Var_Dict = "VAR Dictionary",
+                                                             Var_No = "VAR No Sentiment",
+                                                             NN_Comb = "NN Combined Sentiment",
+                                                             NN_Vader = "NN Vader",
+                                                             NN_Watson = "NN Watson",
+                                                             NN_Dict = "NN Dictionary",
+                                                             NN_No = "NN No Sentiment",
+                                                             NN_Comb_Rel = "NN Relative Combined Sentiment",
+                                                             NN_Vader_Rel = "NN Relative Vader",
+                                                             NN_Watson_Rel = "NN Relative Watson",
+                                                             NN_Dict_Rel = "NN Relative Dictionary",
+                                                             NN_No_Rel = "NN Relative No Sentiment",
+                                                             Ensemble_Best_RMSE = "Ensemble Best RMSE",
+                                                             Ensemble_Best_MAPE = "Ensemble Best MAPE", 
+                                                             LimitedSpread = "Spread",
+                                                             LimitedTrainingSpread = "LimitedSpread"
+                                                             )
+                                            )
+
+
+
+# finally, create the plot
+ggplot(merged_df_long, aes(x=Date, y=Forecast, color=Method)) + geom_line() + geom_line(data=test_data, aes(x=Date, y=WTI), color='black')
+ggsave('ForecastsComparison.pdf', width=7, height=5)
+
+ggplot(merged_df_long %>% filter(Method %in% best_worst_nochange), aes(x=Date, y=Forecast, color=Method)) + geom_line() + geom_line(data=test_data, aes(x=Date, y=WTI), color='black')
+ggsave('ForecastsComparisonBestWorst.pdf', width=7, height=5)
+
+ggplot(merged_df_long %>% filter(Method %in% best_worst_nochange) %>% filter(Date <= "2020-01-15") %>% filter(Date >= "2020-01-01"), aes(x=Date, y=Forecast, color=Method)) + geom_line() + geom_line(data=test_data %>% filter(Date <= "2020-01-15") %>% filter(Date >= "2020-01-01"), aes(x=Date, y=WTI), color='black')
+ggsave('ForecastsComparisonBestWorstZoom.pdf', width=7, height=5)
+
+
+ggplot(merged_df_long %>% dplyr::filter(! Method %in% c('Ensemble Best RMSE', 'Ensemble Best MAPE')), aes(x=Date, y=Forecast, color=Method)) + geom_line() + geom_line(data=test_data, aes(x=Date, y=WTI), color='black')
+ggsave('ForecastsComparisonNoEnsemble.pdf', width=7, height=5)
+```
+
+## Correlation Analysis
+
+Here, we calculate and visualize various correlation comparisons
+
+```{r ggplot}
+
+results_df <- results_df %>% mutate_at(c('RMSE','sum_profit','sum_max_value', 'sum_trades_buy', 'sum_trades_sell'), as.numeric)
+
+rmse_baseline <- results_df %>% filter(Model == 'NoChange') %>% dplyr::select(c(RMSE))
+rmse_baseline <- rmse_baseline[1,1]
+
+mape_baseline <- results_df %>% filter(Model == 'NoChange') %>% dplyr::select(c(MAPE))
+mape_baseline <- mape_baseline[1,1]
+
+results_df$RMSE_Relative = results_df$RMSE / rmse_baseline
+results_df$MAPE_Relative = results_df$MAPE / mape_baseline
+
+# let's round all numeric columns to 3 digits
+results_df <- results_df %>% mutate_if(is.numeric, round, 4) %>% 
+  mutate(across(sum_trades_buy:sum_trades_sell, \(x) round(x, digits=0)))
+
+# also, replace any NaN values with 0
+results_df <- results_df %>% replace(is.na(.),0)
+
+results_df$ModelType <- c("No-Change",rep("VAR",5),rep("Neural Network Absolute", 5),rep("Neural Network Relative", 5), 
+                          "Ensemble Best RMSE", "Ensemble Best MAPE", "Spread", "Limited-Spread")
+results_df$Sentiment <- c("-", "All", "Watson", "Dict", "Vader", "-", "All", "Watson", "Dict", "Vader", "-","All", "Watson", "Dict", "Vader", "-","All", "All", "-", "-")
+
+# for 3 periods
+
+results_df_3 <- results_df_3 %>% mutate_at(c('RMSE','sum_profit','sum_max_value', 'sum_trades_buy', 'sum_trades_sell'), as.numeric)
+
+rmse_baseline_3 <- results_df_3 %>% filter(Model == 'NoChange') %>% dplyr::select(c(RMSE))
+rmse_baseline_3 <- rmse_baseline_3[1,1]
+
+mape_baseline_3 <- results_df_3 %>% filter(Model == 'NoChange') %>% dplyr::select(c(MAPE))
+mape_baseline_3 <- mape_baseline_3[1,1]
+
+results_df_3$RMSE_Relative = results_df_3$RMSE / rmse_baseline_3
+results_df_3$MAPE_Relative = results_df_3$MAPE / mape_baseline_3
+
+# let's round all numeric columns to 3 digits
+results_df_3 <- results_df_3 %>% mutate_if(is.numeric, round, 4) %>% 
+  mutate(across(sum_trades_buy:sum_trades_sell, \(x) round(x, digits=0)))
+
+# also, replace any NaN values with 0
+results_df_3 <- results_df_3 %>% replace(is.na(.),0)
+
+results_df_3$ModelType <- c("No-Change",rep("VAR",5),rep("Neural Network Absolute", 5),rep("Neural Network Relative", 5), 
+                          "Ensemble Best RMSE", "Ensemble Best MAPE", "Spread", "Limited-Spread")
+results_df_3$Sentiment <- c("-", "All", "Watson", "Dict", "Vader", "-", "All", "Watson", "Dict", "Vader", "-","All", "Watson", "Dict", "Vader", "-","All", "All", "-", "-")
+
+
+# for 5 periods
+
+results_df_5 <- results_df_5 %>% mutate_at(c('RMSE','sum_profit','sum_max_value', 'sum_trades_buy', 'sum_trades_sell'), as.numeric)
+
+rmse_baseline_5 <- results_df_5 %>% filter(Model == 'NoChange') %>% dplyr::select(c(RMSE))
+rmse_baseline_5 <- rmse_baseline_5[1,1]
+
+mape_baseline_5 <- results_df_5 %>% filter(Model == 'NoChange') %>% dplyr::select(c(MAPE))
+mape_baseline_5 <- mape_baseline_5[1,1]
+
+results_df_5$RMSE_Relative = results_df_5$RMSE / rmse_baseline_5
+results_df_5$MAPE_Relative = results_df_5$MAPE / mape_baseline_5
+
+# let's round all numeric columns to 3 digits
+results_df_5 <- results_df_5 %>% 
+  mutate_if(is.numeric, round, 4) %>% 
+  mutate(across(sum_trades_buy:sum_trades_sell, \(x) round(x, digits=0)))
+
+# also, replace any NaN values with 0
+results_df_5 <- results_df_5 %>% replace(is.na(.),0)
+
+results_df_5$ModelType <- c("No-Change",rep("VAR",5),rep("Neural Network Absolute", 5),rep("Neural Network Relative", 5), 
+                          "Ensemble Best RMSE", "Ensemble Best MAPE", "Spread", "Limited-Spread")
+results_df_5$Sentiment <- c("-", "All", "Watson", "Dict", "Vader", "-", "All", "Watson", "Dict", "Vader", "-","All", "Watson", "Dict", "Vader", "-","All", "All", "-", "-")
+
+# and merge with other results
+
+results_df <- results_df %>% 
+  merge(result_is_better, by.x = "Model", by.y = "Approach") %>% 
+  merge(pred_directional %>% mutate(across(Model, ~gsub("\\bSpread_limited\\b", "LimitedTrainingSpread",.))) %>% mutate(across(Model, ~gsub("\\bSpread\\b", "LimitedSpread",.)))) %>% 
+  mutate("trade_frequency" = sum_trades_buy + sum_trades_sell)
+
+results_df_3 <- results_df_3 %>% 
+  merge(result_is_better_3, by.x = "Model", by.y = "Approach") %>% 
+  merge(pred_directional_3 %>% mutate(across(Model, ~gsub("\\bSpread_limited\\b", "LimitedTrainingSpread",.))) %>% mutate(across(Model, ~gsub("\\bSpread\\b", "LimitedSpread",.)))) %>% 
+  mutate("trade_frequency" = sum_trades_buy + sum_trades_sell)
+
+results_df_5 <- results_df_5 %>% 
+  merge(result_is_better_5, by.x = "Model", by.y = "Approach") %>% 
+  merge(pred_directional_5 %>% mutate(across(Model, ~gsub("\\bSpread_limited\\b", "LimitedTrainingSpread",.))) %>% mutate(across(Model, ~gsub("\\bSpread\\b", "LimitedSpread",.)))) %>%  
+  mutate("trade_frequency" = sum_trades_buy + sum_trades_sell)
+
+
+print(paste0('correlation between rmse and roi: ', cor(results_df$RMSE, results_df$ROI)))
+print(paste0('correlation between mape and roi: ', cor(results_df$MAPE, results_df$ROI)))
+print(paste0('correlation between mape and rmse: ', cor(results_df$MAPE, results_df$RMSE)))
+print(paste0('correlation between rmse and da: ', cor(results_df$RMSE, results_df$DirectionalStatistic)))
+print(paste0('correlation between statistical performance and roi rank: ', cor(results_df$Performance_Rank, results_df$Overall_Rank, method = 'spearman')))
+
+# 3 periods
+print(paste0('correlation between rmse and roi: ', cor(results_df_3$RMSE, results_df_3$ROI)))
+print(paste0('correlation between mape and roi: ', cor(results_df_3$MAPE, results_df_3$ROI)))
+print(paste0('correlation between mape and rmse: ', cor(results_df_3$MAPE, results_df_3$RMSE)))
+print(paste0('correlation between rmse and da: ', cor(results_df_3$RMSE, results_df_3$DirectionalStatistic)))
+print(paste0('correlation between statistical performance and roi rank: ', cor(results_df_3$Performance_Rank, results_df_3$Overall_Rank, method = 'spearman')))
+
+# 5 periods
+print(paste0('correlation between rmse and roi: ', cor(results_df_5$RMSE, results_df_5$ROI)))
+print(paste0('correlation between mape and roi: ', cor(results_df_5$MAPE, results_df_5$ROI)))
+print(paste0('correlation between mape and rmse: ', cor(results_df_5$MAPE, results_df_5$RMSE)))
+print(paste0('correlation between rmse and da: ', cor(results_df_5$RMSE, results_df_5$DirectionalStatistic)))
+print(paste0('correlation between statistical performance and roi rank: ', cor(results_df_5$Performance_Rank, results_df_5$Overall_Rank, method = 'spearman')))
+
+library(ggpubr)
+# finally, create the plot
+g_rmse <- ggplot(results_df, aes(x=RMSE, y=ROI, shape=Sentiment, color=ModelType)) + geom_point() + geom_smooth(data=results_df, mapping=aes(x=RMSE, y=ROI), method='lm',  se=FALSE, inherit.aes = FALSE)#+ theme(legend.position = 'bottom') #+ geom_abline(intercept =0 , slope = 1)
+ggsave('Correlation_RMSE_ROI.pdf', g_rmse, width=5, height=3)
+
+g_mape <- ggplot(results_df, aes(x=MAPE, y=ROI, shape=Sentiment, color=ModelType)) + geom_point() + geom_smooth(data=results_df, mapping=aes(x=MAPE, y=ROI), method='lm',  se=FALSE, inherit.aes = FALSE) #+ geom_abline(intercept =0 , slope = 1)
+ggsave('Correlation_MAPE_ROI.pdf', g_mape, width=5, height=3)
+
+g_combined <- ggarrange(g_rmse, g_mape, ncol=2, nrow=1, common.legend = TRUE, legend="bottom")
+ggsave('Correlation_combined.pdf', g_combined, width=11, height=5)
+
+
+```
+
+
+## Compiling the Results to Latex
+
+```{r}
+
+library(kableExtra)
+
+results_df %>% dplyr::select(c('ModelType',"Sentiment","RMSE","RMSE_Relative")) %>% arrange(-RMSE_Relative)
+
+# create the basic RMSE table
+kbl(results_df %>% dplyr::select(c('ModelType',"RMSE_Rank","Sentiment","RMSE","RMSE_Relative")) %>% arrange(RMSE), booktabs=T, format = "latex", linesep=c('', '\\addlinespace'))
+
+# create the basic RMSE table
+kbl(results_df %>% dplyr::filter(! ModelType %in% c("Ensemble Best RMSE", "Ensemble Best MAPE")) %>% dplyr::select(c('ModelType',"Sentiment","RMSE","RMSE_Relative")) %>% arrange(-RMSE_Relative), booktabs=T, format = "latex", linesep=c('', '\\addlinespace'))
+
+# create the MAPE table
+kbl(results_df %>% dplyr::select(c('ModelType',"Sentiment","MAPE","MAPE_Relative")) %>% arrange(-MAPE_Relative), booktabs=T, format = "latex", linesep=c('', '\\addlinespace'))
+
+# create the combined RMSE and MAPE table
+kbl(results_df %>% dplyr::select(c('ModelType',"RMSE_Rank","Sentiment","RMSE","RMSE_Relative","MAPE","MAPE_Relative"))  %>%  arrange(RMSE) %>% mutate_if(is.numeric, round, 3), booktabs=T, format = "latex", linesep=c('', '\\addlinespace'))
+
+kbl(results_df %>% dplyr::filter(! ModelType %in% c("Ensemble Best RMSE", "Ensemble Best MAPE")) %>% dplyr::select(c('ModelType',"Sentiment","RMSE","RMSE_Relative","MAPE","MAPE_Relative")) %>% arrange(-RMSE_Relative), booktabs=T, format = "latex", linesep=c('', '\\addlinespace'))
+
+# create the combined RMSE and MAPE table
+kbl(results_df %>% dplyr::filter( ModelType %in% c("Ensemble Best RMSE", "Ensemble Best MAPE")) %>% dplyr::select(c('ModelType',"Sentiment","RMSE","RMSE_Relative","MAPE","MAPE_Relative")) %>% arrange(-RMSE_Relative), booktabs=T, format = "latex", linesep=c('', '\\addlinespace'))
+
+# and with the DM test results and the directional statistic
+kbl(results_df %>% dplyr::select(c('ModelType',"RMSE_Rank","Sentiment","RMSE","RMSE_Relative", "CountBetter","MAPE","MAPE_Relative", "DirectionalStatistic"))   %>%  arrange(RMSE) %>% mutate_if(is.numeric, round, 3), booktabs=T, format = "latex", linesep=c('', '\\addlinespace'))
+
+# create the table with ROI
+kbl(results_df %>% dplyr::select(c('ModelType', "ROI_Rank", "Sentiment","RMSE","MAPE","sum_profit","sum_max_value","ROI", "sum_trades_buy", "sum_trades_sell", "trade_frequency")) %>% arrange(-ROI) %>% mutate_if(is.numeric, round, 3), booktabs=T, format = "latex", linesep=c('', '\\addlinespace'))
+# kbl(results_df %>% arrange(ROI), booktabs=T, format = "latex")
+
+# create the table with ranking
+kbl(results_df %>% dplyr::select(c('ModelType', "Sentiment","RMSE_Rank","MAPE_Rank","Performance_Rank","ROI_Rank","Overall_Rank")) %>% arrange(Overall_Rank) %>% mutate_if(is.numeric, round, 3), booktabs=T, format = "latex", linesep=c('', '\\addlinespace'))
+
+# create the table with DM test results
+kbl(result_is_better %>% dplyr::select(c('Approach',"CountBetter")) %>% arrange(desc(CountBetter)) %>% mutate_if(is.numeric, round, 3), booktabs=T, format = "latex", linesep=c('', '\\addlinespace'))
+# kbl(results_df %>% arrange(ROI), booktabs=T, format = "latex")
+
+
+#### Now for the tables with 3 and 5 forecast periods
+## 3 period
+# create the table with ROI
+kbl(results_df_3 %>% dplyr::select(c('ModelType', "ROI_Rank", "Sentiment","RMSE","CountBetter","DirectionalStatistic","MAPE","sum_profit","sum_max_value","ROI", "sum_trades_buy", "sum_trades_sell", "trade_frequency")) %>% arrange(-ROI) %>% mutate_if(is.numeric, round, 3), booktabs=T, format = "latex", linesep=c('', '\\addlinespace'))
+
+## 5 period
+# create the table with ROI
+kbl(results_df_5 %>% dplyr::select(c('ModelType', "ROI_Rank", "Sentiment","RMSE","CountBetter","DirectionalStatistic","MAPE","sum_profit","sum_max_value","ROI", "sum_trades_buy", "sum_trades_sell", "trade_frequency")) %>% arrange(-ROI) %>% mutate_if(is.numeric, round, 3), booktabs=T, format = "latex", linesep=c('', '\\addlinespace'))
+# kbl(results_df %>% arrange(ROI), booktabs=T, format = "latex")
+
+
+
+```
+
+## Getting high and low sentiment examples
+
+```{r}
+
+sentiment_export <- read.delim('export.csv', sep="|")
+
+most_positive_sentiment <- sentiment_export %>% 
+  slice_max(sentiment_watson, n=10)
+
+most_negative_sentiment <- sentiment_export %>% 
+  slice_min(sentiment_watson, n=10)
+
+```
+
