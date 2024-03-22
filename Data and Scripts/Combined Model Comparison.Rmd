@@ -55,13 +55,6 @@ For different forecast periods, we can get the various 'true' values of the time
 
 ```{r}
 
-# y_true_1 <- as.numeric(test_data$WTIplus1 %>% na.omit())
-# 
-# y_true_3 <- as.numeric(test_data$WTIplus3 %>% na.omit())
-# 
-# # y_true_5 <- tail(test_data$WTI, num_test - 4)
-# y_true_5 <- as.numeric(test_data$WTIplus5 %>% na.omit())
-
 y_true_1 <- as.numeric(test_data$WTI)
 y_true_3 <- as.numeric(lead(test_data$WTI,2) %>% na.omit())
 y_true_5 <- as.numeric(lead(test_data$WTI,4) %>% na.omit())
@@ -78,15 +71,6 @@ num_test_5 <- length(y_true_5)
 The no-change forecast will be the baseline against which all other models will be compared with.
 
 ```{r nochange}
-
-# #looking ahead 1 step
-# y_hat_nochange_all = lag(formatted_training_data$WTI, n=1)[(split+1):nrow(formatted_training_data)]
-# 
-# # looking ahead 3 steps
-# y_hat_nochange_all_3 = lag(formatted_training_data$WTI, n=3)[(split+3):nrow(formatted_training_data)]
-# 
-# # looking ahead 5 steps
-# y_hat_nochange_all_5 = lag(formatted_training_data$WTI, n=5)[(split+5):nrow(formatted_training_data)]
 
 #looking ahead 1 step
 y_hat_nochange_all = formatted_training_data$WTI[(split):(nrow(formatted_training_data)-1)]
@@ -131,7 +115,6 @@ get_VAR_predictions_recursive <- function(training_data, p, lagMax, type, test_d
   var_test_data_all <- var_test_data_all %>% 
     rename(WTI=wticolumn)
   
-  # var <- VAR(var_training_data_all, p = p, lag.max=lagMax, type=type, ic = "AIC")
   var <- lineVar(data = var_training_data_all, lag = p, include = "const",
         model = "VAR", I = "level")
   
@@ -139,25 +122,20 @@ get_VAR_predictions_recursive <- function(training_data, p, lagMax, type, test_d
   data_full <- data_full[complete.cases(data_full),]
   data_full <- data_full %>% 
     rename(WTI=wticolumn)
-  # data_full <- VAR(data_full, lag.max=(lagMax+1), type=type, ic = "AIC")$datamat
-  
+
   data_test <- data_full[(nrow(data_full) - (num_test_local + p -1 )):nrow(data_full),]
-  # data_test <- data_full[(nrow(data_full) - num_test + 1 ):nrow(data_full),]
   
   pred_var <- c()
   
   for (i in 1:(nrow(data_test)-p-steps_ahead+1)){
     pred_var <- c(pred_var, predict(var, newdata = data_test[i:(i+p-1),], n.ahead=steps_ahead)[steps_ahead, ncol(data_test)]) #last column is WTI prediction
   }
-  # note: need to use head() here to correctly get the forecast for the periods
-  # pred_var <- head(predict(var$varresult$WTI, newdata = data_test, n.ahead=steps_ahead), num_test)
-  # pred_var <- head(pred_var, num_test_local)
+
   pred_var
 }
 
 # get prediction for 1 step ahead
 wticolumn = "WTI"
-#wticolumn = "WTIplus1"
 
 steps_ahead = 1
 
@@ -177,7 +155,6 @@ pred_var_1_dict <- get_VAR_predictions_recursive(training_data, p=p, lagMax = la
 
 # repeat for 3 observations
 wticolumn = "WTI"
-# wticolumn = "WTIplus3"
 
 steps_ahead = 3
 
@@ -198,7 +175,6 @@ pred_var_3_dict <- get_VAR_predictions_recursive(training_data, p=p, lagMax = la
 # and for 5 observations
 
 wticolumn = "WTI"
-# wticolumn = "WTIplus5"
 
 steps_ahead = 5
 
@@ -228,49 +204,14 @@ var_arima <- auto.arima(var_training_data_no, ic='aic')
 pred_var_no <- Arima(var_test_data_no, model = var_arima)$fitted
 (pred_var_no <- as.numeric(pred_var_no))
 
-# based on original file
-# test_data_ar <- rbind(training_data[(nrow(training_data)-2):nrow(training_data),],
-#                       test_data)
-# ar <- arima(training_data$WTI, order=c(3, 0, 0))
-# 
-# pred_var_no_1 <- c()
-# for (i in 1:(nrow(test_data_ar)-3)){
-#   pred_var_no_1 <- c(pred_var_no_1, predict(ar, newdata=test_data_ar[i:(i+3),]$WTI, n.ahead = 1, se.fit=F))
-# }
-# 
-# (pred_var_no_1_new <- predict(ar, newdata=test_data_ar[1:4,], n.ahead = 3, se.fit = F))
-# 
-
 ar <- arima(training_data$WTI, order=c(3, 0, 0))
 pred_var_no_1 <- Arima(test_data$WTI, model=ar, order = c(3,0,0))$fitted
 pred_var_no_1 <- as.numeric(pred_var_no_1 %>% na.omit())
 pred_var_no_1
 
-# ar3 <- arima(training_data$WTIplus3, order=c(3, 0, 0))
-# pred_var_no3 <- Arima(test_data$WTIplus3, model=ar, order = c(3,0,0))$fitted
-# pred_var_no_3 <- as.numeric(pred_var_no3 %>% na.omit())
-# pred_var_no_3
-# 
-# ar5 <- arima(training_data$WTIplus5, order=c(3, 0, 0))
-# pred_var_no5 <- Arima(test_data$WTIplus5, model=ar, order = c(3,0,0))$fitted
-# pred_var_no_5 <- as.numeric(pred_var_no5 %>% na.omit())
-# pred_var_no_5
-
 pred_var_no_3 <- head(as.numeric(forecast(pred_var_no_1, h = 3)$fitted), num_test - 2)
 
 pred_var_no_5 <- head(as.numeric(forecast(pred_var_no_1, h = 5)$fitted), num_test - 4)
-
-# (pred_var_no_test <- predict(ar, newdata=test_data$WTI, n.ahead=num_test, se.fit=F))
-# (pred_var_no_test2 <- forecast(ar, h=3))
-# 
-# 
-# # using the forecast function
-# pred_var_no_1 <- Arima(test_data$WTI, model=ar)
-# pred_var_no_1 <- as.numeric(forecast(pred_var_no_1, h = 1)$fitted)
-# 
-# pred_var_no_3 <- head(as.numeric(forecast(pred_var_no_1, h = 3)$fitted), num_test - 2)
-# 
-# pred_var_no_5 <- head(as.numeric(forecast(pred_var_no_1, h = 5)$fitted), num_test - 4)
 
 ```
 
@@ -285,7 +226,6 @@ library('lubridate')
 data <- read.xlsx('Data/SpreadData.xlsx', sheet = 5)
 
 data$Date = convertToDate(data$Date, origin = "1899-12-30", tz="America/New_York")
-# data$Date = as.Date(data$Date, origin = "1970-01-01")
 
 data= data[order(data$Date),]
 data$DateNum <- as.numeric(data$Date)
@@ -537,8 +477,7 @@ First, for the 1 period forecasts:
 
 ```{r nn}
 
-temp = list.files("Data/Run1", pattern="*.csv")
-temp_run2 = list.files("Data/Run2", pattern="*.csv")
+temp_run2 = list.files("Data/Run with forecasting 1 period/Direct Forecast/Run2/", pattern="*.csv")
 
 dir_name <- "Data/Run with forecasting 1 period/Direct Forecast/"
 temp = list.files(dir_name, pattern="*.csv")
@@ -595,7 +534,7 @@ for (file in temp){
   }
 }
 for (file in temp_run2){
-  nn_temp = read.csv(paste0('Data/Run2/',file))
+  nn_temp = read.csv(paste0('Data/Run with forecasting 1 period/Direct Forecast/Run2/',file))
   if(grepl('absolute', file, fixed=TRUE)){
     if(grepl('combination', file, fixed=TRUE)|grepl('Combination', file, fixed=TRUE)){
       nn_comb <- rbind(nn_comb, nn_temp)
@@ -641,19 +580,7 @@ get_min_RMSE_predictions <- function(predictions,average_preds=FALSE){
   nn_temp_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_temp_1)
   nn_temp_1 <- gsub('\\\n ',",", nn_temp_1)
   nn_temp_1 <- strsplit(nn_temp_1, ',')
-  # nn_temp_1 <- as.numeric(nn_temp_1[[1]])
-  # 
-  # nn_temp_2 <- predictions[which(predictions$rmse_train == min(predictions$rmse_train)),]$y_hat
-  # nn_temp_2 <- gsub("\\[|\\]|\\[[|\\]]","",nn_temp_2)
-  # nn_temp_2 <- gsub('\\\n ',",", nn_temp_2)
-  # nn_temp_2 <- strsplit(nn_temp_2, ',')
-  # nn_temp_2 <- as.numeric(nn_temp_2[[1]])
-  # 
-  # nn_temp_train <- predictions[which(predictions$rmse_train == min(predictions$rmse_train)),]$y_hat_train
-  # nn_temp_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_temp_train)
-  # nn_temp_train <- gsub('\\\n ',",", nn_temp_train)
-  # nn_temp_train <- strsplit(nn_temp_train, ',')
-  # nn_temp_train <- as.numeric(nn_temp_train[[1]])
+
   nn_temp_1 <- strsplit(nn_temp_1[[1]], ' ')
   nn_temp_1 <- lapply(nn_temp_1, function(z){ z[!is.na(z) & z != ""]})
   nn_temp_1 <- rapply(nn_temp_1, function(x) tail(x, 1))
@@ -667,15 +594,6 @@ get_min_RMSE_predictions <- function(predictions,average_preds=FALSE){
   nn_temp_2 <- lapply(nn_temp_2, function(z){ z[!is.na(z) & z != ""]})
   nn_temp_2 <- rapply(nn_temp_2, function(x) tail(x, 1))
   nn_temp_2 <- as.numeric(nn_temp_2)
-  
-  # nn_temp_train <- predictions[which(predictions$rmse_train == min(predictions$rmse_train)),]$y_hat_train
-  # nn_temp_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_temp_train)
-  # nn_temp_train <- gsub('\\\n ',",", nn_temp_train)
-  # nn_temp_train <- strsplit(nn_temp_train, ',')
-  # nn_temp_train <- strsplit(nn_temp_train[[1]], ' ')
-  # nn_temp_train <- lapply(nn_temp_train, function(z){ z[!is.na(z) & z != ""]})
-  # nn_temp_train <- rapply(nn_temp_train, function(x) tail(x, 1))
-  # nn_temp_train <- as.numeric(nn_temp_train)
 
   if (average_preds==TRUE){
     nn_temp_pred <- (nn_temp_1 + nn_temp_2)/2
@@ -698,144 +616,6 @@ nn_pred_dict <- get_min_RMSE_predictions(nn_dict, average_preds)
 
 nn_pred_no <- get_min_RMSE_predictions(nn_no, average_preds)
 
-
-# nn_pred <- nn_comb[which(nn_comb$rmse_train == min(nn_comb$rmse_train)),]$y_hat_hypermodel_retrained
-# 
-# nn_pred <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred)
-# nn_pred <- gsub('\\\n ',",", nn_pred)
-# nn_pred <- strsplit(nn_pred, ',')
-# nn_pred <- as.numeric(nn_pred[[1]])
-# 
-# nn_pred_1 <- nn_comb[which(nn_comb$rmse_train == min(nn_comb$rmse_train)),]$y_hat
-# nn_pred_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_1)
-# nn_pred_1 <- gsub('\\\n ',",", nn_pred_1)
-# nn_pred_1 <- strsplit(nn_pred_1, ',')
-# nn_pred_1 <- as.numeric(nn_pred_1[[1]])
-# 
-# nn_pred_train <- nn_comb[which(nn_comb$rmse_train == min(nn_comb$rmse_train)),]$y_hat_train
-# nn_pred_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_train)
-# nn_pred_train <- gsub('\\\n ',",", nn_pred_train)
-# nn_pred_train <- strsplit(nn_pred_train, ',')
-# nn_pred_train <- as.numeric(nn_pred_train[[1]])
-# nn_pred_comb_train <- nn_pred_train
-# 
-# if (average_preds==TRUE){
-#   nn_pred <- (nn_pred + nn_pred_1)/2
-# } else{
-#   nn_pred = nn_pred_1
-# }
-# 
-# nn_pred_comb <- nn_pred
-# 
-# 
-# nn_pred <- nn_watson[which(nn_watson$rmse_train == min(nn_watson$rmse_train)),]$y_hat_hypermodel_retrained
-# nn_pred <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred)
-# nn_pred <- gsub('\\\n ',",", nn_pred)
-# nn_pred <- strsplit(nn_pred, ',')
-# nn_pred <- as.numeric(nn_pred[[1]])
-# 
-# nn_pred_1 <- nn_watson[which(nn_watson$rmse_train == min(nn_watson$rmse_train)),]$y_hat
-# nn_pred_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_1)
-# nn_pred_1 <- gsub('\\\n ',",", nn_pred_1)
-# nn_pred_1 <- strsplit(nn_pred_1, ',')
-# nn_pred_1 <- as.numeric(nn_pred_1[[1]])
-# 
-# nn_pred_train <- nn_watson[which(nn_watson$rmse_train == min(nn_watson$rmse_train)),]$y_hat_train
-# nn_pred_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_train)
-# nn_pred_train <- gsub('\\\n ',",", nn_pred_train)
-# nn_pred_train <- strsplit(nn_pred_train, ',')
-# nn_pred_train <- as.numeric(nn_pred_train[[1]])
-# nn_pred_watson_train <- nn_pred_train
-# 
-# if (average_preds==TRUE){
-#   nn_pred <- (nn_pred + nn_pred_1)/2
-# } else{
-#   nn_pred = nn_pred_1
-# }
-# 
-# nn_pred_watson <- nn_pred
-# 
-# nn_pred <- nn_vader[which(nn_vader$rmse_train == min(nn_vader$rmse_train)),]$y_hat_hypermodel_retrained
-# 
-# nn_pred <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred)
-# nn_pred <- gsub('\\\n ',",", nn_pred)
-# nn_pred <- strsplit(nn_pred, ',')
-# nn_pred <- as.numeric(nn_pred[[1]])
-# 
-# nn_pred_1 <- nn_vader[which(nn_vader$rmse_train == min(nn_vader$rmse_train)),]$y_hat
-# nn_pred_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_1)
-# nn_pred_1 <- gsub('\\\n ',",", nn_pred_1)
-# nn_pred_1 <- strsplit(nn_pred_1, ',')
-# nn_pred_1 <- as.numeric(nn_pred_1[[1]])
-# 
-# nn_pred_train <- nn_vader[which(nn_vader$rmse_train == min(nn_vader$rmse_train)),]$y_hat_train
-# nn_pred_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_train)
-# nn_pred_train <- gsub('\\\n ',",", nn_pred_train)
-# nn_pred_train <- strsplit(nn_pred_train, ',')
-# nn_pred_train <- as.numeric(nn_pred_train[[1]])
-# nn_pred_vader_train <- nn_pred_train
-# 
-# if (average_preds==TRUE){
-#   nn_pred <- (nn_pred + nn_pred_1)/2
-# } else{
-#   nn_pred = nn_pred_1
-# }
-# 
-# nn_pred_vader <- nn_pred
-# 
-# nn_pred <- nn_dict[which(nn_dict$rmse_train == min(nn_dict$rmse_train)),]$y_hat_hypermodel_retrained
-# nn_pred <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred)
-# nn_pred <- gsub('\\\n ',",", nn_pred)
-# nn_pred <- strsplit(nn_pred, ',')
-# nn_pred <- as.numeric(nn_pred[[1]])
-# 
-# nn_pred_1 <- nn_dict[which(nn_dict$rmse_train == min(nn_dict$rmse_train)),]$y_hat
-# nn_pred_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_1)
-# nn_pred_1 <- gsub('\\\n ',",", nn_pred_1)
-# nn_pred_1 <- strsplit(nn_pred_1, ',')
-# nn_pred_1 <- as.numeric(nn_pred_1[[1]])
-# 
-# nn_pred_train <- nn_dict[which(nn_dict$rmse_train == min(nn_dict$rmse_train)),]$y_hat_train
-# nn_pred_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_train)
-# nn_pred_train <- gsub('\\\n ',",", nn_pred_train)
-# nn_pred_train <- strsplit(nn_pred_train, ',')
-# nn_pred_train <- as.numeric(nn_pred_train[[1]])
-# nn_pred_dict_train <- nn_pred_train
-# 
-# if (average_preds==TRUE){
-#   nn_pred <- (nn_pred + nn_pred_1)/2
-# } else{
-#   nn_pred = nn_pred_1
-# }
-# 
-# nn_pred_dict <- nn_pred
-# 
-# nn_pred <- nn_no[which(nn_no$rmse_train == min(nn_no$rmse_train)),]$y_hat_hypermodel_retrained
-# nn_pred <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred)
-# nn_pred <- gsub('\\\n ',",", nn_pred)
-# nn_pred <- strsplit(nn_pred, ',')
-# nn_pred <- as.numeric(nn_pred[[1]])
-# 
-# nn_pred_1 <- nn_no[which(nn_no$rmse_train == min(nn_no$rmse_train)),]$y_hat
-# nn_pred_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_1)
-# nn_pred_1 <- gsub('\\\n ',",", nn_pred_1)
-# nn_pred_1 <- strsplit(nn_pred_1, ',')
-# nn_pred_1 <- as.numeric(nn_pred_1[[1]])
-# 
-# nn_pred_train <- nn_no[which(nn_no$rmse_train == min(nn_no$rmse_train)),]$y_hat_train
-# nn_pred_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_train)
-# nn_pred_train <- gsub('\\\n ',",", nn_pred_train)
-# nn_pred_train <- strsplit(nn_pred_train, ',')
-# nn_pred_train <- as.numeric(nn_pred_train[[1]])
-# nn_pred_no_train <- nn_pred_train
-# 
-# if (average_preds==TRUE){
-#   nn_pred <- (nn_pred + nn_pred_1)/2
-# } else{
-#   nn_pred = nn_pred_1
-# }
-# 
-# nn_pred_no <- nn_pred
 ```
 
 Second, for the 3 period forecasts:
@@ -914,41 +694,6 @@ nn_pred_vader_3 <- head(get_min_RMSE_predictions(nn_vader_3, average_preds), num
 nn_pred_dict_3 <- head(get_min_RMSE_predictions(nn_dict_3, average_preds), num_test - 2)
 
 nn_pred_no_3 <- head(get_min_RMSE_predictions(nn_no_3, average_preds), num_test - 2)
-
-# nn_temp_1 <- predictions[which(predictions$rmse_train == min(predictions$rmse_train)),]$y_hat_hypermodel_retrained
-#   nn_temp_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_temp_1)
-#   nn_temp_1 <- gsub('\\\n ',",", nn_temp_1)
-#   nn_temp_1 <- strsplit(nn_temp_1, ',')
-#   nn_temp_1 <- strsplit(nn_temp_1[[1]], ' ')
-#   nn_temp_1 <- lapply(nn_temp_1, function(z){ z[!is.na(z) & z != ""]})
-#   nn_temp_1 <- rapply(nn_temp_1, function(x) tail(x, 1))
-#   nn_temp_1 <- as.numeric(nn_temp_1)
-#   
-#   nn_temp_2 <- predictions[which(predictions$rmse_train == min(predictions$rmse_train)),]$y_hat
-#   nn_temp_2 <- gsub("\\[|\\]|\\[[|\\]]","",nn_temp_2)
-#   nn_temp_2 <- gsub('\\\n ',",", nn_temp_2)
-#   nn_temp_2 <- strsplit(nn_temp_2, ',')
-#   nn_temp_2 <- strsplit(nn_temp_2[[1]], ' ')
-#   nn_temp_2 <- lapply(nn_temp_2, function(z){ z[!is.na(z) & z != ""]})
-#   nn_temp_2 <- rapply(nn_temp_2, function(x) tail(x, 1))
-#   nn_temp_2 <- as.numeric(nn_temp_2)
-#   
-#   # nn_temp_train <- predictions[which(predictions$rmse_train == min(predictions$rmse_train)),]$y_hat_train
-#   # nn_temp_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_temp_train)
-#   # nn_temp_train <- gsub('\\\n ',",", nn_temp_train)
-#   # nn_temp_train <- strsplit(nn_temp_train, ',')
-#   # nn_temp_train <- strsplit(nn_temp_train[[1]], ' ')
-#   # nn_temp_train <- lapply(nn_temp_train, function(z){ z[!is.na(z) & z != ""]})
-#   # nn_temp_train <- rapply(nn_temp_train, function(x) tail(x, 1))
-#   # nn_temp_train <- as.numeric(nn_temp_train)
-# 
-#   if (average_preds==TRUE){
-#     nn_temp_pred <- (nn_temp_1 + nn_temp_2)/2
-#   } else{
-#     nn_temp_pred = nn_temp_2
-#   }
-#   
-#   nn_temp_pred
 
 ```
 
@@ -1035,147 +780,6 @@ nn_pred_no_5 <- head(get_min_RMSE_predictions(nn_no_5, average_preds), num_test 
 ## Neural Network Models Predicting Relative Price Change
 
 ```{r nn_relative}
-
-
-# get the predictions for the minimum RMSE
-# nn_pred <- nn_comb_rel[which(nn_comb_rel$rmse_train == min(nn_comb_rel$rmse_train)),]$y_hat_hypermodel_retrained
-# 
-# nn_pred <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred)
-# nn_pred <- gsub('\\\n ',",", nn_pred)
-# nn_pred <- strsplit(nn_pred, ',')
-# nn_pred <- as.numeric(nn_pred[[1]])
-# 
-# nn_pred_1 <- nn_comb_rel[which(nn_comb_rel$rmse_train == min(nn_comb_rel$rmse_train)),]$y_hat
-# nn_pred_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_1)
-# nn_pred_1 <- gsub('\\\n ',",", nn_pred_1)
-# nn_pred_1 <- strsplit(nn_pred_1, ',')
-# nn_pred_1 <- as.numeric(nn_pred_1[[1]])
-# 
-# nn_pred_train <- nn_comb_rel[which(nn_comb_rel$rmse_train == min(nn_comb_rel$rmse_train)),]$y_hat_train
-# nn_pred_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_train)
-# nn_pred_train <- gsub('\\\n ',",", nn_pred_train)
-# nn_pred_train <- strsplit(nn_pred_train, ',')
-# nn_pred_train <- as.numeric(nn_pred_train[[1]])
-# nn_pred_comb_rel_train <- nn_pred_train
-# 
-# if (average_preds==TRUE){
-#   nn_pred <- (nn_pred + nn_pred_1)/2
-# } else{
-#   nn_pred = nn_pred_1
-# }
-# 
-# nn_pred_comb_rel <- nn_pred
-# 
-# nn_pred <- nn_watson_rel[which(nn_watson_rel$rmse_train == min(nn_watson_rel$rmse_train)),]$y_hat_hypermodel_retrained
-# nn_pred <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred)
-# nn_pred <- gsub('\\\n ',",", nn_pred)
-# nn_pred <- strsplit(nn_pred, ',')
-# nn_pred <- as.numeric(nn_pred[[1]])
-# 
-# nn_pred_1 <- nn_watson_rel[which(nn_watson_rel$rmse_train == min(nn_watson_rel$rmse_train)),]$y_hat
-# nn_pred_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_1)
-# nn_pred_1 <- gsub('\\\n ',",", nn_pred_1)
-# nn_pred_1 <- strsplit(nn_pred_1, ',')
-# nn_pred_1 <- as.numeric(nn_pred_1[[1]])
-# 
-# nn_pred_train <- nn_watson_rel[which(nn_watson_rel$rmse_train == min(nn_watson_rel$rmse_train)),]$y_hat_train
-# nn_pred_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_train)
-# nn_pred_train <- gsub('\\\n ',",", nn_pred_train)
-# nn_pred_train <- strsplit(nn_pred_train, ',')
-# nn_pred_train <- as.numeric(nn_pred_train[[1]])
-# nn_pred_watson_rel_train <- nn_pred_train
-# 
-# if (average_preds==TRUE){
-#   nn_pred <- (nn_pred + nn_pred_1)/2
-# } else{
-#   nn_pred = nn_pred_1
-# }
-# 
-# nn_pred_watson_rel <- nn_pred
-# 
-# nn_pred <- nn_vader_rel[which(nn_vader_rel$rmse_train == min(nn_vader_rel$rmse_train)),]$y_hat_hypermodel_retrained
-# 
-# nn_pred <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred)
-# nn_pred <- gsub('\\\n ',",", nn_pred)
-# nn_pred <- strsplit(nn_pred, ',')
-# nn_pred <- as.numeric(nn_pred[[1]])
-# 
-# nn_pred_1 <- nn_vader_rel[which(nn_vader_rel$rmse_train == min(nn_vader_rel$rmse_train)),]$y_hat
-# nn_pred_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_1)
-# nn_pred_1 <- gsub('\\\n ',",", nn_pred_1)
-# nn_pred_1 <- strsplit(nn_pred_1, ',')
-# nn_pred_1 <- as.numeric(nn_pred_1[[1]])
-# 
-# nn_pred_train <- nn_vader_rel[which(nn_vader_rel$rmse_train == min(nn_vader_rel$rmse_train)),]$y_hat_train
-# nn_pred_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_train)
-# nn_pred_train <- gsub('\\\n ',",", nn_pred_train)
-# nn_pred_train <- strsplit(nn_pred_train, ',')
-# nn_pred_train <- as.numeric(nn_pred_train[[1]])
-# nn_pred_vader_rel_train <- nn_pred_train
-# 
-# if (average_preds==TRUE){
-#   nn_pred <- (nn_pred + nn_pred_1)/2
-# } else{
-#   nn_pred = nn_pred_1
-# }
-# 
-# nn_pred_vader_rel <- nn_pred
-# 
-# nn_pred <- nn_dict_rel[which(nn_dict_rel$rmse_train == min(nn_dict_rel$rmse_train)),]$y_hat_hypermodel_retrained
-# nn_pred <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred)
-# nn_pred <- gsub('\\\n ',",", nn_pred)
-# nn_pred <- strsplit(nn_pred, ',')
-# nn_pred <- as.numeric(nn_pred[[1]])
-# 
-# nn_pred_1 <- nn_dict_rel[which(nn_dict_rel$rmse_train == min(nn_dict_rel$rmse_train)),]$y_hat
-# nn_pred_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_1)
-# nn_pred_1 <- gsub('\\\n ',",", nn_pred_1)
-# nn_pred_1 <- strsplit(nn_pred_1, ',')
-# nn_pred_1 <- as.numeric(nn_pred_1[[1]])
-# 
-# nn_pred_train <- nn_dict_rel[which(nn_dict_rel$rmse_train == min(nn_dict_rel$rmse_train)),]$y_hat_train
-# nn_pred_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_train)
-# nn_pred_train <- gsub('\\\n ',",", nn_pred_train)
-# nn_pred_train <- strsplit(nn_pred_train, ',')
-# nn_pred_train <- as.numeric(nn_pred_train[[1]])
-# 
-# nn_pred_dict_rel_train <- nn_pred_train
-# 
-# if (average_preds==TRUE){
-#   nn_pred <- (nn_pred + nn_pred_1)/2
-# } else{
-#   nn_pred = nn_pred_1
-# }
-# 
-# nn_pred_dict_rel <- nn_pred
-# 
-# nn_pred <- nn_no_rel[which(nn_no_rel$rmse_train == min(nn_no_rel$rmse_train)),]$y_hat_hypermodel_retrained
-# nn_pred <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred)
-# nn_pred <- gsub('\\\n ',",", nn_pred)
-# nn_pred <- strsplit(nn_pred, ',')
-# nn_pred <- as.numeric(nn_pred[[1]])
-# 
-# nn_pred_1 <- nn_no_rel[which(nn_no_rel$rmse_train == min(nn_no_rel$rmse_train)),]$y_hat
-# nn_pred_1 <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_1)
-# nn_pred_1 <- gsub('\\\n ',",", nn_pred_1)
-# nn_pred_1 <- strsplit(nn_pred_1, ',')
-# nn_pred_1 <- as.numeric(nn_pred_1[[1]])
-# 
-# nn_pred_train <- nn_no_rel[which(nn_no_rel$rmse_train == min(nn_no_rel$rmse_train)),]$y_hat_train
-# nn_pred_train <- gsub("\\[|\\]|\\[[|\\]]","",nn_pred_train)
-# nn_pred_train <- gsub('\\\n ',",", nn_pred_train)
-# nn_pred_train <- strsplit(nn_pred_train, ',')
-# nn_pred_train <- as.numeric(nn_pred_train[[1]])
-# 
-# nn_pred_no_rel_train <- nn_pred_train
-# 
-# if (average_preds==TRUE){
-#   nn_pred <- (nn_pred + nn_pred_1)/2
-# } else{
-#   nn_pred = nn_pred_1
-# }
-# 
-# nn_pred_no_rel <- nn_pred
 
 # 1 Period Forecast
 nn_pred_comb_rel <- get_min_RMSE_predictions(nn_comb_rel, average_preds)
@@ -1719,8 +1323,7 @@ pairwise_combinations <- function(object_list, test_df, list_of_names) {
         
         return_df <- bind_rows(return_df, temp_df)
       }
-      # test_df <- test_df %>% 
-      #  add_row(FirstError = list_of_names[i], SecondError = list_of_names[j], p.value=temp_dm_test$p.value, p.value.less = temp_dm_test_less$p.value, p.value.greater = temp_dm_test_greater$p.value, statistic = temp_dm_test$statistic)
+
     }
   }
   return_df
@@ -2531,6 +2134,7 @@ Finally, calculate the ROI defines as profit per invested amount.
 ```{r roi}
 
 results_df$ROI <- as.numeric(results_df$sum_profit) / as.numeric(results_df$sum_max_value)
+results_df$ROI[is.nan(results_df$ROI)]<-0
 
 results_df_3$ROI <- as.numeric(results_df_3$sum_profit) / as.numeric(results_df_3$sum_max_value)
 
@@ -2881,7 +2485,6 @@ kbl(results_df %>% dplyr::select(c('ModelType', "Sentiment","RMSE_Rank","MAPE_Ra
 
 # create the table with DM test results
 kbl(result_is_better %>% dplyr::select(c('Approach',"CountBetter")) %>% arrange(desc(CountBetter)) %>% mutate_if(is.numeric, round, 3), booktabs=T, format = "latex", linesep=c('', '\\addlinespace'))
-# kbl(results_df %>% arrange(ROI), booktabs=T, format = "latex")
 
 
 #### Now for the tables with 3 and 5 forecast periods
@@ -2892,9 +2495,6 @@ kbl(results_df_3 %>% dplyr::select(c('ModelType', "ROI_Rank", "Sentiment","RMSE"
 ## 5 period
 # create the table with ROI
 kbl(results_df_5 %>% dplyr::select(c('ModelType', "ROI_Rank", "Sentiment","RMSE","CountBetter","DirectionalStatistic","MAPE","sum_profit","sum_max_value","ROI", "sum_trades_buy", "sum_trades_sell", "trade_frequency")) %>% arrange(-ROI) %>% mutate_if(is.numeric, round, 3), booktabs=T, format = "latex", linesep=c('', '\\addlinespace'))
-# kbl(results_df %>% arrange(ROI), booktabs=T, format = "latex")
-
-
 
 ```
 
